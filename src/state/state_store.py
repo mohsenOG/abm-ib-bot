@@ -1,0 +1,2 @@
+"""Atomic state store placeholder."""
+

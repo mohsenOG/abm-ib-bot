@@ -72,35 +72,37 @@ Create:
 
 ```text
 
-main.py
-
 requirements.txt
+
+settings.yml
 
 .env.example
 
+src/
 
+src/main.py
 
-config/
+src/config/
 
-logging\_setup/
+src/logging\_setup/
 
-telegram/
+src/notifications/
 
-ib\_gateway/
+src/ib\_gateway/
 
-data/
+src/data/
 
-strategy/
+src/strategy/
 
-risk/
+src/risk/
 
-execution/
+src/execution/
 
-state/
+src/state/
 
-monitoring/
+src/monitoring/
 
-trade\_journal/
+src/trade\_journal/
 
 ```
 
@@ -116,43 +118,43 @@ Create placeholder files:
 
 ```text
 
-config/settings.py
+src/config/settings.py
 
-logging\_setup/logger.py
+src/logging\_setup/logger.py
 
-telegram/notifier.py
+src/notifications/notifier.py
 
-ib\_gateway/connection.py
+src/ib\_gateway/connection.py
 
-ib\_gateway/contracts.py
+src/ib\_gateway/contracts.py
 
-ib\_gateway/account.py
+src/ib\_gateway/account.py
 
-data/market\_data.py
+src/data/market\_data.py
 
-data/candle\_store.py
+src/data/candle\_store.py
 
-strategy/indicators.py
+src/strategy/indicators.py
 
-strategy/bias\_model.py
+src/strategy/bias\_model.py
 
-strategy/signals.py
+src/strategy/signals.py
 
-risk/risk\_manager.py
+src/risk/risk\_manager.py
 
-risk/sizing.py
+src/risk/sizing.py
 
-execution/order\_builder.py
+src/execution/order\_builder.py
 
-execution/order\_manager.py
+src/execution/order\_manager.py
 
-state/state\_store.py
+src/state/state\_store.py
 
-monitoring/health.py
+src/monitoring/health.py
 
-monitoring/emergency\_stop.py
+src/monitoring/emergency\_stop.py
 
-trade\_journal/journal.py
+src/trade\_journal/journal.py
 
 ```
 
@@ -192,7 +194,9 @@ all Python modules import without syntax errors
 
 requirements.txt contains initial dependencies
 
-.env.example contains placeholder values only
+settings.yml contains non-confidential initial settings
+
+.env.example contains confidential or account-specific placeholder values only
 
 ```
 
@@ -206,9 +210,9 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
 ```
 
@@ -230,7 +234,7 @@ Report result.
 
 
 
-Implement `config/settings.py`.
+Implement `src/config/settings.py`.
 
 
 
@@ -238,7 +242,7 @@ Implement `config/settings.py`.
 
 
 
-The config module should load and validate settings from environment variables.
+The config module should load and validate non-confidential settings from root `settings.yml` and confidential/account-specific settings from environment variables.
 
 
 
@@ -256,11 +260,11 @@ IB port
 
 IB client ID
 
-IB account ID optional
+IB account ID optional from environment
 
-Telegram bot token
+Telegram bot token from environment
 
-Telegram chat IDs
+Telegram chat IDs from environment
 
 timeframe fixed to 1 hour
 
@@ -310,7 +314,7 @@ ask before choosing exact gold instrument defaults
 
 ```text
 
-settings load from environment
+settings load from root `settings.yml` and environment
 
 missing critical settings fail clearly
 
@@ -332,11 +336,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from config.settings import load\_settings; print('config import ok')"
+$env:PYTHONPATH="src"; python -c "from config.settings import load\_settings; print('config import ok')"
 
 ```
 
@@ -358,7 +362,7 @@ Report result.
 
 
 
-Implement `logging\_setup/logger.py`.
+Implement `src/logging\_setup/logger.py`.
 
 
 
@@ -436,11 +440,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from logging\_setup.logger import setup\_logging; print('logger import ok')"
+$env:PYTHONPATH="src"; python -c "from logging\_setup.logger import setup\_logging; print('logger import ok')"
 
 ```
 
@@ -462,7 +466,7 @@ Report result.
 
 
 
-Implement `state/state\_store.py`.
+Implement `src/state/state\_store.py`.
 
 
 
@@ -566,11 +570,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from state.state\_store import StateStore; print('state import ok')"
+$env:PYTHONPATH="src"; python -c "from state.state\_store import StateStore; print('state import ok')"
 
 ```
 
@@ -592,7 +596,7 @@ Report result.
 
 
 
-Implement `trade\_journal/journal.py`.
+Implement `src/trade\_journal/journal.py`.
 
 
 
@@ -706,11 +710,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from trade\_journal.journal import TradeJournal; print('journal import ok')"
+$env:PYTHONPATH="src"; python -c "from trade\_journal.journal import TradeJournal; print('journal import ok')"
 
 ```
 
@@ -732,7 +736,7 @@ Report result.
 
 
 
-Implement `telegram/notifier.py`.
+Implement `src/notifications/notifier.py`.
 
 
 
@@ -826,11 +830,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from telegram.notifier import TelegramNotifier; print('telegram import ok')"
+$env:PYTHONPATH="src"; python -c "from notifications.notifier import TelegramNotifier; print('telegram import ok')"
 
 ```
 
@@ -852,7 +856,7 @@ Report result.
 
 
 
-Implement `ib\_gateway/connection.py`.
+Implement `src/ib\_gateway/connection.py`.
 
 
 
@@ -932,11 +936,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from ib\_gateway.connection import IBConnection; print('ib connection import ok')"
+$env:PYTHONPATH="src"; python -c "from ib\_gateway.connection import IBConnection; print('ib connection import ok')"
 
 ```
 
@@ -958,7 +962,7 @@ If IB Gateway/TWS is available, optionally run a manual paper connection check o
 
 
 
-Implement `ib\_gateway/contracts.py`.
+Implement `src/ib\_gateway/contracts.py`.
 
 
 
@@ -1014,11 +1018,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from ib\_gateway.contracts import build\_contract; print('contracts import ok')"
+$env:PYTHONPATH="src"; python -c "from ib\_gateway.contracts import build\_contract; print('contracts import ok')"
 
 ```
 
@@ -1040,7 +1044,7 @@ Manual IB qualification check only after user confirmation.
 
 
 
-Implement `ib\_gateway/account.py`.
+Implement `src/ib\_gateway/account.py`.
 
 
 
@@ -1116,11 +1120,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from ib\_gateway.account import AccountReader; print('account import ok')"
+$env:PYTHONPATH="src"; python -c "from ib\_gateway.account import AccountReader; print('account import ok')"
 
 ```
 
@@ -1142,7 +1146,7 @@ Manual IB account check only after user confirmation.
 
 
 
-Implement `data/market\_data.py`.
+Implement `src/data/market\_data.py`.
 
 
 
@@ -1220,11 +1224,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from data.market\_data import MarketDataClient; print('market data import ok')"
+$env:PYTHONPATH="src"; python -c "from data.market\_data import MarketDataClient; print('market data import ok')"
 
 ```
 
@@ -1246,7 +1250,7 @@ Manual IB data fetch only after user confirmation.
 
 
 
-Implement `data/candle\_store.py`.
+Implement `src/data/candle\_store.py`.
 
 
 
@@ -1324,11 +1328,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from data.candle\_store import CandleStore; print('candle store import ok')"
+$env:PYTHONPATH="src"; python -c "from data.candle\_store import CandleStore; print('candle store import ok')"
 
 ```
 
@@ -1350,7 +1354,7 @@ Report result.
 
 
 
-Implement `strategy/indicators.py`.
+Implement `src/strategy/indicators.py`.
 
 
 
@@ -1436,11 +1440,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from strategy.indicators import add\_indicators; print('indicators import ok')"
+$env:PYTHONPATH="src"; python -c "from strategy.indicators import add\_indicators; print('indicators import ok')"
 
 ```
 
@@ -1462,7 +1466,7 @@ Report result.
 
 
 
-Implement `strategy/bias\_model.py`.
+Implement `src/strategy/bias\_model.py`.
 
 
 
@@ -1548,11 +1552,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from strategy.bias\_model import calculate\_bias; print('bias model import ok')"
+$env:PYTHONPATH="src"; python -c "from strategy.bias\_model import calculate\_bias; print('bias model import ok')"
 
 ```
 
@@ -1574,7 +1578,7 @@ Report result.
 
 
 
-Implement `strategy/signals.py`.
+Implement `src/strategy/signals.py`.
 
 
 
@@ -1654,11 +1658,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from strategy.signals import generate\_signal; print('signals import ok')"
+$env:PYTHONPATH="src"; python -c "from strategy.signals import generate\_signal; print('signals import ok')"
 
 ```
 
@@ -1680,7 +1684,7 @@ Report result.
 
 
 
-Implement `risk/sizing.py` and `risk/risk\_manager.py`.
+Implement `src/risk/sizing.py` and `src/risk/risk\_manager.py`.
 
 
 
@@ -1760,11 +1764,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from risk.risk\_manager import RiskManager; print('risk import ok')"
+$env:PYTHONPATH="src"; python -c "from risk.risk\_manager import RiskManager; print('risk import ok')"
 
 ```
 
@@ -1786,7 +1790,7 @@ Report result.
 
 
 
-Implement `execution/order\_builder.py`.
+Implement `src/execution/order\_builder.py`.
 
 
 
@@ -1860,11 +1864,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from execution.order\_builder import OrderBuilder; print('order builder import ok')"
+$env:PYTHONPATH="src"; python -c "from execution.order\_builder import OrderBuilder; print('order builder import ok')"
 
 ```
 
@@ -1886,7 +1890,7 @@ Report result.
 
 
 
-Implement `execution/order\_manager.py` for paper trading.
+Implement `src/execution/order\_manager.py` for paper trading.
 
 
 
@@ -1970,11 +1974,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from execution.order\_manager import OrderManager; print('order manager import ok')"
+$env:PYTHONPATH="src"; python -c "from execution.order\_manager import OrderManager; print('order manager import ok')"
 
 ```
 
@@ -1996,7 +2000,7 @@ Manual paper order test only after user confirmation.
 
 
 
-Implement `monitoring/health.py` and `monitoring/emergency\_stop.py`.
+Implement `src/monitoring/health.py` and `src/monitoring/emergency\_stop.py`.
 
 
 
@@ -2078,11 +2082,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python -c "from monitoring.health import HealthMonitor; from monitoring.emergency\_stop import EmergencyStop; print('monitoring import ok')"
+$env:PYTHONPATH="src"; python -c "from monitoring.health import HealthMonitor; from monitoring.emergency\_stop import EmergencyStop; print('monitoring import ok')"
 
 ```
 
@@ -2202,11 +2206,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python main.py --help
+$env:PYTHONPATH="src"; python src/main.py --help
 
 ```
 
@@ -2308,11 +2312,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python main.py --help
+$env:PYTHONPATH="src"; python src/main.py --help
 
 ```
 
@@ -2410,11 +2414,11 @@ Run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
-python main.py --help
+$env:PYTHONPATH="src"; python src/main.py --help
 
 ```
 

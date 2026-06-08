@@ -126,13 +126,15 @@ Each module must do one main job only.
 
 Current module map:
 
+Source code lives under `src/`. Root-level files are for docs, configuration, dependencies, and project metadata.
+
 
 
 config              settings only
 
 logging\_setup       logs only
 
-telegram            alerts only
+notifications       Telegram alerts only
 
 ib\_gateway          IB connection, contracts, account only
 
@@ -150,7 +152,7 @@ monitoring          health checks and emergency stop only
 
 trade\_journal       trade history only
 
-main.py             orchestration only
+src/main.py         orchestration only
 
 
 
@@ -168,9 +170,9 @@ execution must not calculate indicators
 
 state must not make trading decisions
 
-telegram must not approve trades
+notifications must not approve trades
 
-main.py must coordinate, not contain strategy logic
+src/main.py must coordinate, not contain strategy logic
 
 \---
 
@@ -201,6 +203,8 @@ Do not hardcode account IDs.
 Do not hardcode Telegram tokens.
 
 Do not hardcode IB credentials.
+
+Do not put secrets in `settings.yml`.
 
 Do not expose secrets in logs or Telegram messages.
 
@@ -444,9 +448,9 @@ At minimum, run:
 
 
 
-```bash
+```powershell
 
-python -m compileall .
+python -m compileall src
 
 ```
 

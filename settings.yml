@@ -1,0 +1,26 @@
+trading:
+  mode: alert_only
+  timeframe: 1 hour
+
+ib:
+  host: 127.0.0.1
+  port: 7497
+  client_id: 1
+
+instrument:
+  asset_class: null
+  symbol: null
+  exchange: null
+  currency: USD
+  expiry: null
+
+risk:
+  initial_capital: 1000
+  capital_slots: 10
+  max_concurrent_position_slots: 1
+
+paths:
+  log_dir: logs
+  state_file: bot_state.json
+  trade_journal_file: trade_journal.csv
+

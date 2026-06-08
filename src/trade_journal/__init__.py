@@ -1,0 +1,2 @@
+"""Trade journal package."""
+

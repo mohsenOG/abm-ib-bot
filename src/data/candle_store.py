@@ -1,0 +1,2 @@
+"""Candle store placeholder."""
+

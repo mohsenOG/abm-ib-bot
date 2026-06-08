@@ -1,0 +1,6 @@
+ib_insync
+pandas
+python-dotenv
+python-telegram-bot
+PyYAML
+

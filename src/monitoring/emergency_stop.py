@@ -1,0 +1,2 @@
+"""Emergency stop placeholder."""
+

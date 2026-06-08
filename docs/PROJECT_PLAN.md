@@ -54,35 +54,41 @@ gold\_ib\_bot/
 
 │
 
-├── main.py
-
 ├── requirements.txt
+
+├── settings.yml
 
 ├── .env.example
 
+├── docs/
+
+├── src/
+
 │
 
-├── config/
+│   ├── main.py
 
-├── logging\_setup/
+│   ├── config/
 
-├── telegram/
+│   ├── logging\_setup/
 
-├── ib\_gateway/
+│   ├── notifications/
 
-├── data/
+│   ├── ib\_gateway/
 
-├── strategy/
+│   ├── data/
 
-├── risk/
+│   ├── strategy/
 
-├── execution/
+│   ├── risk/
 
-├── state/
+│   ├── execution/
 
-├── monitoring/
+│   ├── state/
 
-└── trade\_journal/
+│   ├── monitoring/
+
+│   └── trade\_journal/
 
 ```
 
@@ -126,11 +132,29 @@ Load and validate all bot settings.
 
 ```text
 
-config/
+src/config/
 
 ├── \_\_init\_\_.py
 
 └── settings.py
+
+```
+
+Root-level files:
+
+```text
+
+settings.yml       non-confidential bot settings
+
+.env               confidential or account-specific values
+
+.env.example       placeholder values for confidential or account-specific values
+
+requirements.txt   Python dependencies
+
+docs/              project documentation and task rules
+
+src/               Python source code
 
 ```
 
@@ -142,13 +166,13 @@ config/
 
 ```text
 
-load environment variables
+load confidential environment variables
 
-load bot settings
+load non-confidential bot settings from root `settings.yml`
 
 validate IB connection settings
 
-validate Telegram settings
+validate Telegram secret settings
 
 validate gold instrument settings
 
@@ -210,15 +234,25 @@ IB:
 
 \- client ID
 
-\- account ID if needed
+\- account ID from environment if needed
 
 
 
 Telegram:
 
-\- bot token
+\- bot token from environment
 
-\- chat IDs
+\- chat IDs from environment
+
+
+
+Config file split:
+
+\- non-confidential global settings belong in root `settings.yml`
+
+\- confidential or account-specific values belong in `.env`
+
+\- `.env.example` must contain placeholders only
 
 ```
 
@@ -350,7 +384,7 @@ no IB order logic
 
 
 
-\# 3. `telegram/`
+\# 3. `notifications/`
 
 
 
@@ -368,7 +402,7 @@ Send Telegram notifications.
 
 ```text
 
-telegram/
+src/notifications/
 
 ├── \_\_init\_\_.py
 
@@ -638,7 +672,7 @@ Fetch and maintain clean 1-hour gold candle data.
 
 ```text
 
-data/
+src/data/
 
 ├── \_\_init\_\_.py
 
@@ -740,7 +774,7 @@ Convert candles into BUY/SELL signals.
 
 ```text
 
-strategy/
+src/strategy/
 
 ├── \_\_init\_\_.py
 
@@ -936,7 +970,7 @@ Approve or block trades using simple fixed-capital slot sizing.
 
 ```text
 
-risk/
+src/risk/
 
 ├── \_\_init\_\_.py
 
@@ -1084,7 +1118,7 @@ Build, submit, and track orders.
 
 ```text
 
-execution/
+src/execution/
 
 ├── \_\_init\_\_.py
 
@@ -1236,7 +1270,7 @@ Persist bot state across restarts using atomic writes.
 
 ```text
 
-state/
+src/state/
 
 ├── \_\_init\_\_.py
 
@@ -1358,7 +1392,7 @@ Health checks and emergency stop.
 
 ```text
 
-monitoring/
+src/monitoring/
 
 ├── \_\_init\_\_.py
 
@@ -1490,7 +1524,7 @@ Record all trading activity for review.
 
 ```text
 
-trade\_journal/
+src/trade\_journal/
 
 ├── \_\_init\_\_.py
 
@@ -1594,7 +1628,7 @@ no IB calls
 
 
 
-\# `main.py`
+\# `src/main.py`
 
 
 
@@ -1708,7 +1742,7 @@ config              settings only
 
 logging\_setup       logs only
 
-telegram            alerts only
+notifications       Telegram alerts only
 
 ib\_gateway          IB connection, contracts, account only
 
@@ -1726,7 +1760,7 @@ monitoring          health checks and emergency stop only
 
 trade\_journal       trade history only
 
-main.py             orchestration only
+src/main.py         orchestration only
 
 ```
 
@@ -1754,7 +1788,7 @@ config
 
 logging\_setup
 
-telegram
+notifications
 
 ib\_gateway
 
@@ -1762,7 +1796,7 @@ data
 
 state
 
-main.py
+src/main.py
 
 ```
 
@@ -2098,7 +2132,7 @@ config loads settings
 
 logging\_setup writes logs
 
-telegram sends alerts
+notifications sends Telegram alerts
 
 ib\_gateway talks to IB
 

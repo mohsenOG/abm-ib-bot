@@ -1,0 +1,2 @@
+"""Indicator calculation placeholder."""
+
