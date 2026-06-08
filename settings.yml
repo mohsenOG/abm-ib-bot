@@ -7,6 +7,12 @@ ib:
   port: 7497
   client_id: 1
 
+telegram:
+  enabled: true
+  max_retries: 3
+  retry_delay_seconds: 2
+  timeout_seconds: 10
+
 instrument:
   asset_class: null
   symbol: null

@@ -32,8 +32,12 @@ class IBSettings:
 
 @dataclass(frozen=True)
 class TelegramSettings:
-    bot_token: str
+    enabled: bool
+    bot_token: str | None
     chat_ids: tuple[str, ...]
+    max_retries: int
+    retry_delay_seconds: float
+    timeout_seconds: float
 
 
 @dataclass(frozen=True)
@@ -100,7 +104,7 @@ def load_settings(
         project_root=project_root,
         trading=_load_trading(raw),
         ib=_load_ib(raw),
-        telegram=_load_telegram(),
+        telegram=_load_telegram(raw),
         instrument=_load_instrument(raw),
         risk=_load_risk(raw),
         logger=_load_logger(raw, project_root),
@@ -163,7 +167,37 @@ def _load_ib(raw: dict[str, Any]) -> IBSettings:
     return IBSettings(host=host, port=port, client_id=client_id, account_id=account_id)
 
 
-def _load_telegram() -> TelegramSettings:
+def _load_telegram(raw: dict[str, Any]) -> TelegramSettings:
+    section = _optional_section(raw, "telegram")
+    enabled = _optional_bool(section, "enabled", "telegram.enabled", True)
+    max_retries = _optional_int(section, "max_retries", "telegram.max_retries", 3)
+    retry_delay_seconds = _optional_float(
+        section,
+        "retry_delay_seconds",
+        "telegram.retry_delay_seconds",
+        2.0,
+    )
+    timeout_seconds = _optional_float(section, "timeout_seconds", "telegram.timeout_seconds", 10.0)
+
+    if max_retries < 0:
+        raise SettingsValidationError("telegram.max_retries must be zero or greater.")
+
+    if retry_delay_seconds < 0:
+        raise SettingsValidationError("telegram.retry_delay_seconds must be zero or greater.")
+
+    if timeout_seconds <= 0:
+        raise SettingsValidationError("telegram.timeout_seconds must be greater than zero.")
+
+    if not enabled:
+        return TelegramSettings(
+            enabled=False,
+            bot_token=None,
+            chat_ids=(),
+            max_retries=max_retries,
+            retry_delay_seconds=retry_delay_seconds,
+            timeout_seconds=timeout_seconds,
+        )
+
     bot_token = _required_env_string("TELEGRAM_BOT_TOKEN")
     chat_ids_raw = _required_env_string("TELEGRAM_CHAT_IDS")
     chat_ids = tuple(chat_id.strip() for chat_id in chat_ids_raw.split(",") if chat_id.strip())
@@ -171,7 +205,14 @@ def _load_telegram() -> TelegramSettings:
     if not chat_ids:
         raise SettingsValidationError("TELEGRAM_CHAT_IDS must contain at least one chat ID.")
 
-    return TelegramSettings(bot_token=bot_token, chat_ids=chat_ids)
+    return TelegramSettings(
+        enabled=True,
+        bot_token=bot_token,
+        chat_ids=chat_ids,
+        max_retries=max_retries,
+        retry_delay_seconds=retry_delay_seconds,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _load_instrument(raw: dict[str, Any]) -> InstrumentSettings:
@@ -267,6 +308,15 @@ def _required_section(raw: dict[str, Any], key: str) -> dict[str, Any]:
     return value
 
 
+def _optional_section(raw: dict[str, Any], key: str) -> dict[str, Any]:
+    value = raw.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise SettingsValidationError(f"Invalid settings section: {key}.")
+    return value
+
+
 def _required_string(section: dict[str, Any], key: str, field_name: str) -> str:
     value = section.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -290,11 +340,32 @@ def _required_int(section: dict[str, Any], key: str, field_name: str) -> int:
     return value
 
 
+def _optional_int(section: dict[str, Any], key: str, field_name: str, default: int) -> int:
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SettingsValidationError(f"{field_name} must be an integer.")
+    return value
+
+
 def _required_float(section: dict[str, Any], key: str, field_name: str) -> float:
     value = section.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SettingsValidationError(f"{field_name} must be a number.")
     return float(value)
+
+
+def _optional_float(section: dict[str, Any], key: str, field_name: str, default: float) -> float:
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SettingsValidationError(f"{field_name} must be a number.")
+    return float(value)
+
+
+def _optional_bool(section: dict[str, Any], key: str, field_name: str, default: bool) -> bool:
+    value = section.get(key, default)
+    if not isinstance(value, bool):
+        raise SettingsValidationError(f"{field_name} must be true or false.")
+    return value
 
 
 def _required_env_string(name: str) -> str:
