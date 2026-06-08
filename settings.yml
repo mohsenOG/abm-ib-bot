@@ -13,12 +13,26 @@ telegram:
   retry_delay_seconds: 2
   timeout_seconds: 10
 
-instrument:
-  asset_class: null
-  symbol: null
-  exchange: null
+signal_instrument:
+  asset_class: CMDTY
+  symbol: XAUUSD
+  exchange: SMART
   currency: USD
   expiry: null
+
+execution_instruments:
+  long:
+    asset_class: IOPT
+    con_id: null
+    local_symbol: null
+    exchange: null
+    currency: EUR
+  short:
+    asset_class: IOPT
+    con_id: null
+    local_symbol: null
+    exchange: null
+    currency: EUR
 
 risk:
   initial_capital: 1000

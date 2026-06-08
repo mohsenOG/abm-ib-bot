@@ -50,6 +50,21 @@ class InstrumentSettings:
 
 
 @dataclass(frozen=True)
+class ExecutionInstrumentSettings:
+    asset_class: str
+    con_id: int | None
+    local_symbol: str | None
+    exchange: str | None
+    currency: str
+
+
+@dataclass(frozen=True)
+class ExecutionInstrumentsSettings:
+    long: ExecutionInstrumentSettings
+    short: ExecutionInstrumentSettings
+
+
+@dataclass(frozen=True)
 class RiskSettings:
     initial_capital: float
     capital_slots: int
@@ -77,7 +92,9 @@ class AppSettings:
     trading: TradingSettings
     ib: IBSettings
     telegram: TelegramSettings
+    signal_instrument: InstrumentSettings
     instrument: InstrumentSettings
+    execution_instruments: ExecutionInstrumentsSettings
     risk: RiskSettings
     logger: LoggerSettings
     paths: PathSettings
@@ -99,13 +116,16 @@ def load_settings(
         load_dotenv(env_path)
 
     raw = _load_yaml(settings_path)
+    signal_instrument = _load_signal_instrument(raw)
 
     return AppSettings(
         project_root=project_root,
         trading=_load_trading(raw),
         ib=_load_ib(raw),
         telegram=_load_telegram(raw),
-        instrument=_load_instrument(raw),
+        signal_instrument=signal_instrument,
+        instrument=signal_instrument,
+        execution_instruments=_load_execution_instruments(raw),
         risk=_load_risk(raw),
         logger=_load_logger(raw, project_root),
         paths=_load_paths(raw, project_root),
@@ -215,16 +235,26 @@ def _load_telegram(raw: dict[str, Any]) -> TelegramSettings:
     )
 
 
-def _load_instrument(raw: dict[str, Any]) -> InstrumentSettings:
-    section = _required_section(raw, "instrument")
+def _load_signal_instrument(raw: dict[str, Any]) -> InstrumentSettings:
+    section = _optional_section(raw, "signal_instrument")
+    if not section:
+        section = _required_section(raw, "instrument")
+
     asset_class = _required_string(section, "asset_class", "instrument.asset_class")
     symbol = _required_string(section, "symbol", "instrument.symbol")
     exchange = _required_string(section, "exchange", "instrument.exchange")
     currency = _required_string(section, "currency", "instrument.currency")
     expiry = _optional_string(section, "expiry", "instrument.expiry")
 
+    asset_class = asset_class.upper()
+    currency = currency.upper()
+    exchange = exchange.upper()
+
     if currency != "USD":
-        raise SettingsValidationError("instrument.currency must be USD for this gold bot.")
+        raise SettingsValidationError("signal_instrument.currency must be USD for this gold bot.")
+
+    if asset_class != "CMDTY":
+        raise SettingsValidationError("signal_instrument.asset_class must be CMDTY for XAUUSD signals.")
 
     return InstrumentSettings(
         asset_class=asset_class,
@@ -232,6 +262,76 @@ def _load_instrument(raw: dict[str, Any]) -> InstrumentSettings:
         exchange=exchange,
         currency=currency,
         expiry=expiry,
+    )
+
+
+def _load_execution_instruments(raw: dict[str, Any]) -> ExecutionInstrumentsSettings:
+    section = _optional_section(raw, "execution_instruments")
+    if not section:
+        return ExecutionInstrumentsSettings(
+            long=_empty_execution_instrument("long"),
+            short=_empty_execution_instrument("short"),
+        )
+
+    return ExecutionInstrumentsSettings(
+        long=_load_execution_instrument(section, "long"),
+        short=_load_execution_instrument(section, "short"),
+    )
+
+
+def _load_execution_instrument(
+    section: dict[str, Any],
+    side: str,
+) -> ExecutionInstrumentSettings:
+    instrument_section = _optional_section(section, side)
+    if not instrument_section:
+        return _empty_execution_instrument(side)
+
+    asset_class = _required_string(
+        instrument_section,
+        "asset_class",
+        f"execution_instruments.{side}.asset_class",
+    ).upper()
+    con_id = _optional_int_or_none(
+        instrument_section,
+        "con_id",
+        f"execution_instruments.{side}.con_id",
+    )
+    local_symbol = _optional_string(
+        instrument_section,
+        "local_symbol",
+        f"execution_instruments.{side}.local_symbol",
+    )
+    exchange = _optional_string(
+        instrument_section,
+        "exchange",
+        f"execution_instruments.{side}.exchange",
+    )
+    currency = _required_string(
+        instrument_section,
+        "currency",
+        f"execution_instruments.{side}.currency",
+    ).upper()
+
+    if asset_class != "IOPT":
+        raise SettingsValidationError(f"execution_instruments.{side}.asset_class must be IOPT.")
+
+    return ExecutionInstrumentSettings(
+        asset_class=asset_class,
+        con_id=con_id,
+        local_symbol=local_symbol,
+        exchange=exchange.upper() if exchange is not None else None,
+        currency=currency,
+    )
+
+
+def _empty_execution_instrument(side: str) -> ExecutionInstrumentSettings:
+    return ExecutionInstrumentSettings(
+        asset_class="IOPT",
+        con_id=None,
+        local_symbol=None,
+        exchange=None,
+        currency="EUR",
     )
 
 
@@ -344,6 +444,17 @@ def _optional_int(section: dict[str, Any], key: str, field_name: str, default: i
     value = section.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int):
         raise SettingsValidationError(f"{field_name} must be an integer.")
+    return value
+
+
+def _optional_int_or_none(section: dict[str, Any], key: str, field_name: str) -> int | None:
+    value = section.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SettingsValidationError(f"{field_name} must be an integer when provided.")
+    if value <= 0:
+        raise SettingsValidationError(f"{field_name} must be greater than zero when provided.")
     return value
 
 
