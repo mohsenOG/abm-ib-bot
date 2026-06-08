@@ -276,7 +276,7 @@ fixed capital per position
 
 gold instrument fields
 
-log directory
+logger file path
 
 state file path
 
@@ -384,13 +384,13 @@ console logging
 
 file logging
 
-rotating logs
+current-run file logging
 
 clear format
 
 exception logging
 
-secret masking support
+no special secret handling in the logger
 
 ```
 
@@ -420,13 +420,13 @@ do not log secrets
 
 logger can be initialized from config
 
-logs directory is created automatically
+log file parent directory is created automatically
 
 console logs work
 
 file logs work
 
-secrets can be masked
+callers must avoid logging secrets
 
 ```
 

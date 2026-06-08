@@ -318,7 +318,7 @@ create console logger
 
 create file logger
 
-rotate log files
+write the current run to one log file
 
 format logs clearly
 

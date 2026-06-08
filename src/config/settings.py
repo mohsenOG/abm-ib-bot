@@ -54,8 +54,15 @@ class RiskSettings:
 
 
 @dataclass(frozen=True)
+class LoggerSettings:
+    file_path: Path
+    level: str
+    format: str
+    date_format: str
+
+
+@dataclass(frozen=True)
 class PathSettings:
-    log_dir: Path
     state_file: Path
     trade_journal_file: Path
 
@@ -68,6 +75,7 @@ class AppSettings:
     telegram: TelegramSettings
     instrument: InstrumentSettings
     risk: RiskSettings
+    logger: LoggerSettings
     paths: PathSettings
 
 
@@ -95,6 +103,7 @@ def load_settings(
         telegram=_load_telegram(),
         instrument=_load_instrument(raw),
         risk=_load_risk(raw),
+        logger=_load_logger(raw, project_root),
         paths=_load_paths(raw, project_root),
     )
 
@@ -217,9 +226,28 @@ def _load_risk(raw: dict[str, Any]) -> RiskSettings:
     )
 
 
+def _load_logger(raw: dict[str, Any], project_root: Path) -> LoggerSettings:
+    section = _required_section(raw, "logger")
+    file_path = _resolve_project_path(project_root, _required_string(section, "file_path", "logger.file_path"))
+    level = _required_string(section, "level", "logger.level").upper()
+    log_format = _required_string(section, "format", "logger.format")
+    date_format = _required_string(section, "date_format", "logger.date_format")
+
+    valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    if level not in valid_levels:
+        allowed = ", ".join(sorted(valid_levels))
+        raise SettingsValidationError(f"logger.level must be one of: {allowed}.")
+
+    return LoggerSettings(
+        file_path=file_path,
+        level=level,
+        format=log_format,
+        date_format=date_format,
+    )
+
+
 def _load_paths(raw: dict[str, Any], project_root: Path) -> PathSettings:
     section = _required_section(raw, "paths")
-    log_dir = _resolve_project_path(project_root, _required_string(section, "log_dir", "paths.log_dir"))
     state_file = _resolve_project_path(project_root, _required_string(section, "state_file", "paths.state_file"))
     trade_journal_file = _resolve_project_path(
         project_root,
@@ -227,7 +255,6 @@ def _load_paths(raw: dict[str, Any], project_root: Path) -> PathSettings:
     )
 
     return PathSettings(
-        log_dir=log_dir,
         state_file=state_file,
         trade_journal_file=trade_journal_file,
     )
