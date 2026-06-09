@@ -29,9 +29,11 @@ ALLOWED_EVENT_TYPES = {
     "risk_approved",
     "risk_blocked",
     "order_submitted",
+    "order_partially_filled",
     "order_filled",
     "order_rejected",
     "order_cancelled",
+    "order_inactive",
     "emergency_stop",
     "critical_error",
 }

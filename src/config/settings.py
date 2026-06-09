@@ -17,9 +17,16 @@ class SettingsValidationError(ValueError):
 
 
 @dataclass(frozen=True)
+class AllowedDirectionsSettings:
+    long: bool
+    short: bool
+
+
+@dataclass(frozen=True)
 class TradingSettings:
     mode: str
     timeframe: str
+    allowed_directions: AllowedDirectionsSettings
 
 
 @dataclass(frozen=True)
@@ -160,6 +167,7 @@ def _load_trading(raw: dict[str, Any]) -> TradingSettings:
     section = _required_section(raw, "trading")
     mode = _required_string(section, "mode", "trading.mode")
     timeframe = _required_string(section, "timeframe", "trading.timeframe")
+    allowed_directions = _load_allowed_directions(section)
 
     if mode not in ALLOWED_TRADING_MODES:
         allowed = ", ".join(sorted(ALLOWED_TRADING_MODES))
@@ -168,7 +176,18 @@ def _load_trading(raw: dict[str, Any]) -> TradingSettings:
     if timeframe != REQUIRED_TIMEFRAME:
         raise SettingsValidationError(f"trading.timeframe must be exactly '{REQUIRED_TIMEFRAME}'.")
 
-    return TradingSettings(mode=mode, timeframe=timeframe)
+    return TradingSettings(mode=mode, timeframe=timeframe, allowed_directions=allowed_directions)
+
+
+def _load_allowed_directions(section: dict[str, Any]) -> AllowedDirectionsSettings:
+    directions = _optional_section(section, "allowed_directions")
+    long_enabled = _optional_bool(directions, "long", "trading.allowed_directions.long", True)
+    short_enabled = _optional_bool(directions, "short", "trading.allowed_directions.short", True)
+
+    if not long_enabled and not short_enabled:
+        raise SettingsValidationError("At least one trading direction must be enabled.")
+
+    return AllowedDirectionsSettings(long=long_enabled, short=short_enabled)
 
 
 def _load_ib(raw: dict[str, Any]) -> IBSettings:

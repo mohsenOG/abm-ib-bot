@@ -1,6 +1,9 @@
 trading:
   mode: alert_only
   timeframe: 1 hour
+  allowed_directions:
+    long: true
+    short: true
 
 ib:
   host: 127.0.0.1

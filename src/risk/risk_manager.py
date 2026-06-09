@@ -11,7 +11,7 @@ from risk.sizing import QuantityRules, RiskSizingError, calculate_quantity
 
 SignalSide = Literal["BUY", "SELL"]
 ExecutionSide = Literal["long", "short"]
-OrderAction = Literal["BUY"]
+OrderAction = Literal["BUY", "SELL"]
 RiskDecisionStatus = Literal["approved", "blocked"]
 
 ACTIVE_ORDER_STATUSES = {
@@ -93,6 +93,12 @@ class RiskManager:
         if normalized_signal.signal_id == last_signal_id:
             return _blocked("Signal was already processed.")
 
+        if normalized_signal.side == "BUY" and not self._settings.trading.allowed_directions.long:
+            return _blocked("Long trades are disabled by trading.allowed_directions.long.")
+
+        if normalized_signal.side == "SELL" and not self._settings.trading.allowed_directions.short:
+            return _blocked("Short trades are disabled by trading.allowed_directions.short.")
+
         active_position_slots = _count_active_position_slots(account_snapshot, product)
         active_order_slots = _count_active_order_slots(account_snapshot, product)
         active_slots = active_position_slots + active_order_slots
@@ -120,7 +126,7 @@ class RiskManager:
                 signal_timestamp=normalized_signal.timestamp,
                 signal_side=normalized_signal.side,
                 execution_side=_execution_side_for_signal(normalized_signal.side),
-                order_action="BUY",
+                order_action=_order_action_for_signal(normalized_signal.side),
                 quantity=quantity,
                 capital_allocated=self._risk.capital_per_position,
                 signal_price=normalized_signal.price,
@@ -176,6 +182,10 @@ def _normalize_product(product: ExecutionProduct | ExecutionInstrumentSettings) 
 
 def _execution_side_for_signal(side: SignalSide) -> ExecutionSide:
     return "long" if side == "BUY" else "short"
+
+
+def _order_action_for_signal(side: SignalSide) -> OrderAction:
+    return "BUY" if side == "BUY" else "SELL"
 
 
 def _count_active_position_slots(account_snapshot: Any, product: ExecutionProduct) -> int:
