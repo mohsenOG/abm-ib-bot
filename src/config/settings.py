@@ -80,6 +80,23 @@ class RiskSettings:
 
 
 @dataclass(frozen=True)
+class StrategySettings:
+    bias_threshold: float
+    use_heikin_ashi: bool
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    poll_seconds: int
+
+
+@dataclass(frozen=True)
+class LiveModeSettings:
+    enabled: bool
+    allow_telegram_failure: bool
+
+
+@dataclass(frozen=True)
 class LoggerSettings:
     file_path: Path
     level: str
@@ -103,6 +120,9 @@ class AppSettings:
     instrument: InstrumentSettings
     execution_instruments: ExecutionInstrumentsSettings
     risk: RiskSettings
+    strategy: StrategySettings
+    runtime: RuntimeSettings
+    live: LiveModeSettings
     logger: LoggerSettings
     paths: PathSettings
 
@@ -134,6 +154,9 @@ def load_settings(
         instrument=signal_instrument,
         execution_instruments=_load_execution_instruments(raw),
         risk=_load_risk(raw),
+        strategy=_load_strategy(raw),
+        runtime=_load_runtime(raw),
+        live=_load_live(raw),
         logger=_load_logger(raw, project_root),
         paths=_load_paths(raw, project_root),
     )
@@ -383,6 +406,46 @@ def _load_risk(raw: dict[str, Any]) -> RiskSettings:
         capital_slots=capital_slots,
         capital_per_position=initial_capital / capital_slots,
         max_concurrent_position_slots=max_concurrent_position_slots,
+    )
+
+
+def _load_strategy(raw: dict[str, Any]) -> StrategySettings:
+    section = _required_section(raw, "strategy")
+    bias_threshold = _required_float(section, "bias_threshold", "strategy.bias_threshold")
+    use_heikin_ashi = _optional_bool(section, "use_heikin_ashi", "strategy.use_heikin_ashi", False)
+
+    if bias_threshold <= 0 or bias_threshold >= 1:
+        raise SettingsValidationError("strategy.bias_threshold must be greater than 0 and lower than 1.")
+
+    return StrategySettings(
+        bias_threshold=bias_threshold,
+        use_heikin_ashi=use_heikin_ashi,
+    )
+
+
+def _load_runtime(raw: dict[str, Any]) -> RuntimeSettings:
+    section = _required_section(raw, "runtime")
+    poll_seconds = _required_int(section, "poll_seconds", "runtime.poll_seconds")
+
+    if poll_seconds <= 0:
+        raise SettingsValidationError("runtime.poll_seconds must be greater than zero.")
+
+    return RuntimeSettings(poll_seconds=poll_seconds)
+
+
+def _load_live(raw: dict[str, Any]) -> LiveModeSettings:
+    section = _required_section(raw, "live")
+    enabled = _optional_bool(section, "enabled", "live.enabled", False)
+    allow_telegram_failure = _optional_bool(
+        section,
+        "allow_telegram_failure",
+        "live.allow_telegram_failure",
+        False,
+    )
+
+    return LiveModeSettings(
+        enabled=enabled,
+        allow_telegram_failure=allow_telegram_failure,
     )
 
 

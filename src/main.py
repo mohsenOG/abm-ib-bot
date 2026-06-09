@@ -1,2 +1,340 @@
-"""Entry point placeholder for the Interactive Brokers gold bot."""
+"""Main runner for the Interactive Brokers gold bot."""
 
+from __future__ import annotations
+
+import argparse
+import time
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+from config.settings import AppSettings, load_settings
+from data.candle_store import CandleStore
+from data.market_data import MarketDataClient
+from execution.order_manager import OrderManager
+from ib_gateway.account import AccountReader
+from ib_gateway.connection import IBConnection
+from ib_gateway.contracts import build_execution_contract, build_signal_contract, qualify_contract
+from logging_setup.logger import get_logger, setup_logging
+from monitoring.emergency_stop import EmergencyStop
+from monitoring.health import HealthMonitor, HealthReport
+from monitoring.live_mode import LiveModeGate, LiveModeGateError
+from notifications.notifier import TelegramNotifier
+from risk.risk_manager import RiskManager, TradePlan
+from state.state_store import BotState, StateStore
+from strategy.bias_model import calculate_bias
+from strategy.indicators import add_indicators
+from strategy.signals import Signal, generate_signal
+from trade_journal.journal import TradeJournal
+
+
+ALERT_ONLY_MODE = "alert_only"
+PAPER_MODE = "paper"
+LIVE_MODE = "live"
+
+
+class BotRunnerError(RuntimeError):
+    """Raised when the main runner cannot continue safely."""
+
+
+def main() -> int:
+    args = _parse_args()
+
+    if args.command == "run":
+        runner = BotRunner(settings_file=args.settings, env_file=args.env_file)
+        runner.run(once=args.once)
+        return 0
+
+    raise BotRunnerError(f"Unsupported command: {args.command}")
+
+
+class BotRunner:
+    """Coordinate config, IB, data, strategy, risk, execution, state, and alerts."""
+
+    def __init__(
+        self,
+        *,
+        settings_file: str | Path | None = None,
+        env_file: str | Path | None = None,
+    ) -> None:
+        self.settings = load_settings(settings_file=settings_file, env_file=env_file)
+        self.logger = setup_logging(self.settings)
+        self.notifier = TelegramNotifier(self.settings, logger=get_logger("notifications.telegram"))
+        self.state_store = StateStore(self.settings.paths.state_file)
+        self.journal = TradeJournal()
+        self.health_monitor = HealthMonitor(notifier=self.notifier)
+        self.emergency_stop = EmergencyStop(self.state_store, notifier=self.notifier, journal=self.journal)
+        self.ib_connection = IBConnection(self.settings)
+
+        _validate_mode_startup(self.settings)
+
+    def run(self, *, once: bool = False) -> None:
+        """Start the bot runner."""
+
+        state = self.state_store.load()
+        self.logger.info("Bot starting. mode=%s once=%s", self.settings.trading.mode, once)
+        _safe_notify(self.notifier, "send_startup", f"Bot started. mode={self.settings.trading.mode}")
+
+        try:
+            ib = self.ib_connection.connect()
+            _safe_notify(self.notifier, "send_ib_connected")
+
+            signal_contract = qualify_contract(ib, build_signal_contract(self.settings))
+
+            if self.settings.trading.mode == LIVE_MODE:
+                self._run_live_preflight_and_stop(ib=ib, signal_contract=signal_contract, state=state)
+                return
+
+            self._run_loop(ib=ib, signal_contract=signal_contract, state=state, once=once)
+        except KeyboardInterrupt:
+            self.logger.info("Bot interrupted by user.")
+        except Exception as exc:
+            self._handle_critical_error(exc)
+            raise
+        finally:
+            self._shutdown()
+
+    def _run_loop(self, *, ib: Any, signal_contract: Any, state: BotState, once: bool) -> None:
+        while True:
+            state = self.state_store.load()
+            try:
+                state = self._run_cycle(ib=ib, signal_contract=signal_contract, state=state)
+                self.health_monitor.clear_errors()
+            except Exception:
+                error_check = self.health_monitor.record_error()
+                self.logger.exception("Bot cycle failed. repeated_errors=%s", self.health_monitor.repeated_errors)
+                if error_check.level == "critical":
+                    self.emergency_stop.activate("Repeated bot cycle errors reached the configured limit.", state=state)
+                raise
+
+            if once:
+                return
+
+            time.sleep(self.settings.runtime.poll_seconds)
+
+    def _run_cycle(self, *, ib: Any, signal_contract: Any, state: BotState) -> BotState:
+        candles = MarketDataClient(ib).fetch_historical_bars(signal_contract)
+        candle_store = CandleStore(latest_processed_candle_ts=state.last_processed_candle_ts)
+        update = candle_store.update(candles)
+
+        self.logger.info(
+            "Candle store updated. rows_received=%s rows_stored=%s latest_closed=%s gaps=%s",
+            update.rows_received,
+            update.rows_stored,
+            update.latest_closed_candle_ts,
+            len(update.gaps),
+        )
+
+        if update.latest_closed_candle_ts is None:
+            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=None)
+            return state
+
+        if not candle_store.has_new_closed_candle():
+            self.logger.info("No new closed candle to process.")
+            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=update.latest_closed_candle_ts)
+            return state
+
+        signal = self._calculate_latest_signal(candle_store, state)
+        latest_closed_ts = candle_store.latest_closed_candle_ts
+
+        if latest_closed_ts is not None:
+            candle_store.mark_processed(latest_closed_ts)
+            state.last_processed_candle_ts = latest_closed_ts.isoformat()
+
+        if signal is None:
+            self.logger.info("No signal on latest closed candle.")
+            self.state_store.save(state)
+            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_closed_ts)
+            return state
+
+        self._record_signal(signal)
+
+        if self.settings.trading.mode == ALERT_ONLY_MODE:
+            state.last_signal_id = signal.signal_id
+            self.state_store.save(state)
+            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_closed_ts)
+            return state
+
+        if self.settings.trading.mode == PAPER_MODE:
+            state = self._handle_paper_signal(ib=ib, signal=signal, state=state)
+            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_closed_ts)
+            return state
+
+        raise BotRunnerError(f"Unsupported trading mode during cycle: {self.settings.trading.mode}")
+
+    def _calculate_latest_signal(self, candle_store: CandleStore, state: BotState) -> Signal | None:
+        indicators = add_indicators(
+            candle_store.get_candles(),
+            use_heikin_ashi=self.settings.strategy.use_heikin_ashi,
+        )
+        biased_data = calculate_bias(indicators)
+        return generate_signal(
+            biased_data,
+            self.settings.strategy.bias_threshold,
+            last_signal_id=state.last_signal_id,
+        )
+
+    def _record_signal(self, signal: Signal) -> None:
+        self.logger.info("Signal generated. signal_id=%s side=%s price=%s", signal.signal_id, signal.side, signal.price)
+        self.journal.record(
+            "signal",
+            timestamp=signal.timestamp,
+            signal_id=signal.signal_id,
+            side=signal.side,
+            price=signal.price,
+            raw_json=asdict(signal),
+        )
+        _safe_notify(
+            self.notifier,
+            "send_signal",
+            signal_id=signal.signal_id,
+            side=signal.side,
+            price=signal.price,
+            bias=signal.bias,
+            confidence=signal.confidence,
+            timestamp=signal.timestamp,
+        )
+
+    def _handle_paper_signal(self, *, ib: Any, signal: Signal, state: BotState) -> BotState:
+        self.emergency_stop.assert_trading_allowed(state)
+        account_snapshot = AccountReader(ib).read_snapshot()
+        risk_decision = RiskManager(self.settings).evaluate_signal(
+            signal,
+            account_snapshot,
+            last_signal_id=state.last_signal_id,
+        )
+
+        if not risk_decision.approved:
+            reason = risk_decision.reason or "Risk manager blocked the trade."
+            self.logger.info("Risk blocked signal. signal_id=%s reason=%s", signal.signal_id, reason)
+            self.journal.record("risk_blocked", signal_id=signal.signal_id, side=signal.side, reason=reason)
+            _safe_notify(self.notifier, "send_risk_blocked", signal_id=signal.signal_id, reason=reason)
+            state.last_signal_id = signal.signal_id
+            self.state_store.save(state)
+            return state
+
+        trade_plan = _require_trade_plan(risk_decision.trade_plan)
+        self.journal.record(
+            "risk_approved",
+            signal_id=trade_plan.signal_id,
+            side=trade_plan.signal_side,
+            quantity=trade_plan.quantity,
+            price=trade_plan.signal_price,
+            raw_json=asdict(trade_plan),
+        )
+
+        execution_contract = qualify_contract(
+            ib,
+            build_execution_contract(self.settings, trade_plan.execution_side),
+        )
+        result = OrderManager(
+            self.settings,
+            ib,
+            state_store=self.state_store,
+            journal=self.journal,
+            notifier=self.notifier,
+        ).submit_trade_plan(contract=execution_contract, trade_plan=trade_plan, state=state)
+
+        updated_state = result.state if result.state is not None else state
+        updated_state.last_signal_id = trade_plan.signal_id
+        self.state_store.save(updated_state)
+        return updated_state
+
+    def _run_live_preflight_and_stop(self, *, ib: Any, signal_contract: Any, state: BotState) -> None:
+        candles = MarketDataClient(ib).fetch_historical_bars(signal_contract)
+        candle_store = CandleStore(candles, latest_processed_candle_ts=state.last_processed_candle_ts)
+        account_snapshot = AccountReader(ib).read_snapshot()
+        health_report = self._run_health_checks(
+            ib=ib,
+            state=state,
+            latest_market_data_ts=candle_store.latest_closed_candle_ts,
+        )
+
+        LiveModeGate(self.settings, notifier=self.notifier).run_startup_checks(
+            state=state,
+            account_snapshot=account_snapshot,
+            health_report=health_report,
+        )
+        raise LiveModeGateError("Live mode readiness checks passed, but live execution is not enabled in this task.")
+
+    def _run_health_checks(
+        self,
+        *,
+        ib: Any,
+        state: BotState,
+        latest_market_data_ts: Any | None,
+    ) -> HealthReport:
+        report = self.health_monitor.run_checks(
+            ib_client=ib,
+            latest_market_data_ts=latest_market_data_ts,
+            last_processed_candle_ts=state.last_processed_candle_ts,
+        )
+        if report.critical:
+            self.logger.error("Health check critical. level=%s", report.level)
+        return report
+
+    def _handle_critical_error(self, exc: Exception) -> None:
+        self.logger.exception("Critical bot error.")
+        self.journal.record("critical_error", reason=str(exc), raw_json={"error_type": type(exc).__name__})
+        _safe_notify(self.notifier, "send_critical_error", details=str(exc))
+
+    def _shutdown(self) -> None:
+        try:
+            if self.ib_connection.is_connected():
+                self.ib_connection.disconnect()
+                _safe_notify(self.notifier, "send_ib_disconnected")
+        finally:
+            _safe_notify(self.notifier, "send_shutdown", "Bot stopped")
+            self.logger.info("Bot stopped.")
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the Interactive Brokers gold trading bot.")
+    subparsers = parser.add_subparsers(dest="command")
+
+    run_parser = subparsers.add_parser("run", help="Start the bot runner.")
+    run_parser.add_argument("--once", action="store_true", help="Run one closed-candle cycle and exit.")
+    run_parser.add_argument("--settings", type=Path, default=None, help="Path to settings.yml.")
+    run_parser.add_argument("--env-file", type=Path, default=None, help="Path to .env file.")
+
+    parser.set_defaults(command="run")
+    return parser.parse_args()
+
+
+def _validate_mode_startup(settings: AppSettings) -> None:
+    mode = settings.trading.mode
+    if mode == ALERT_ONLY_MODE:
+        return
+
+    if mode == PAPER_MODE:
+        _validate_paper_execution_config(settings)
+        return
+
+    if mode == LIVE_MODE:
+        return
+
+    raise BotRunnerError(f"Unsupported trading mode: {mode}")
+
+
+def _validate_paper_execution_config(settings: AppSettings) -> None:
+    if settings.trading.allowed_directions.long:
+        build_execution_contract(settings, "long")
+
+    if settings.trading.allowed_directions.short:
+        build_execution_contract(settings, "short")
+
+
+def _require_trade_plan(value: TradePlan | None) -> TradePlan:
+    if value is None:
+        raise BotRunnerError("Risk decision was approved without a trade plan.")
+    return value
+
+
+def _safe_notify(notifier: Any, method_name: str, *args: Any, **kwargs: Any) -> None:
+    method = getattr(notifier, method_name, None)
+    if callable(method):
+        method(*args, **kwargs)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

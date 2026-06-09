@@ -42,6 +42,17 @@ risk:
   capital_slots: 10
   max_concurrent_position_slots: 1
 
+strategy:
+  bias_threshold: 0.5
+  use_heikin_ashi: false
+
+runtime:
+  poll_seconds: 300
+
+live:
+  enabled: false
+  allow_telegram_failure: false
+
 logger:
   file_path: logs/bot.log
   level: INFO
