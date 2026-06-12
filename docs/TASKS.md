@@ -864,7 +864,7 @@ Implement `src/ib\_gateway/connection.py`.
 
 
 
-Create basic IB connection management using `ib\_insync`.
+Create basic IB connection management using `ib\_async`.
 
 
 

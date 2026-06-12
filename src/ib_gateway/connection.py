@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ib_insync import IB
+from ib_async import IB
 
 from logging_setup.logger import get_logger
 
@@ -19,6 +19,7 @@ class IBConnectionConfig:
     host: str
     port: int
     client_id: int
+    account_id: str | None
 
 
 class IBConnection:
@@ -42,7 +43,7 @@ class IBConnection:
 
         return self._config
 
-    def connect(self) -> IB:
+    async def connect(self) -> IB:
         """Connect to IB explicitly and return the connected client."""
 
         if self.is_connected():
@@ -62,10 +63,11 @@ class IBConnection:
         )
 
         try:
-            self._ib.connect(
+            await self._ib.connectAsync(
                 self._config.host,
                 self._config.port,
                 clientId=self._config.client_id,
+                account=self._config.account_id or "",
             )
         except Exception as exc:
             self._logger.exception(
@@ -107,13 +109,13 @@ class IBConnection:
             self._logger.exception("IB connection status check failed.")
             return False
 
-    def reconnect(self) -> IB:
+    async def reconnect(self) -> IB:
         """Disconnect if needed, then open a fresh IB connection."""
 
         self._logger.info("Reconnecting to IB.")
         if self.is_connected():
             self.disconnect()
-        return self.connect()
+        return await self.connect()
 
     def require_connected(self) -> None:
         """Raise when an IB action is attempted while disconnected."""
@@ -127,6 +129,7 @@ def _load_connection_config(settings: Any) -> IBConnectionConfig:
     host = getattr(ib_settings, "host", None)
     port = getattr(ib_settings, "port", None)
     client_id = getattr(ib_settings, "client_id", None)
+    account_id = getattr(ib_settings, "account_id", None)
 
     if not isinstance(host, str) or not host.strip():
         raise IBConnectionError("IB host is required.")
@@ -137,8 +140,12 @@ def _load_connection_config(settings: Any) -> IBConnectionConfig:
     if isinstance(client_id, bool) or not isinstance(client_id, int):
         raise IBConnectionError("IB client_id must be an integer.")
 
+    if account_id is not None and (not isinstance(account_id, str) or not account_id.strip()):
+        raise IBConnectionError("IB account_id must be a non-empty string when provided.")
+
     return IBConnectionConfig(
         host=host.strip(),
         port=port,
         client_id=client_id,
+        account_id=account_id.strip() if account_id is not None else None,
     )

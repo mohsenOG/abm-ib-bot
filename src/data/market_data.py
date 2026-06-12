@@ -48,7 +48,7 @@ class MarketDataClient:
         self._ib_client = ib_client
         self._logger = get_logger("data.market_data")
 
-    def fetch_historical_bars(
+    async def fetch_historical_bars(
         self,
         contract: Any,
         request: HistoricalDataRequest | None = None,
@@ -75,7 +75,7 @@ class MarketDataClient:
         )
 
         try:
-            bars = ib.reqHistoricalData(
+            bars = await ib.reqHistoricalDataAsync(
                 contract,
                 endDateTime=data_request.end_datetime,
                 durationStr=data_request.duration,
@@ -129,7 +129,7 @@ def _resolve_ib_client(ib_client: Any) -> Any:
 
 
 def _looks_like_ib_client(value: Any) -> bool:
-    return all(callable(getattr(value, name, None)) for name in ("reqHistoricalData", "isConnected"))
+    return all(callable(getattr(value, name, None)) for name in ("reqHistoricalDataAsync", "isConnected"))
 
 
 def _validate_request(request: HistoricalDataRequest) -> None:

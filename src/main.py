@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import time
+import asyncio
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -42,7 +42,7 @@ def main() -> int:
 
     if args.command == "run":
         runner = BotRunner(settings_file=args.settings, env_file=args.env_file)
-        runner.run(once=args.once)
+        asyncio.run(runner.run(once=args.once))
         return 0
 
     raise BotRunnerError(f"Unsupported command: {args.command}")
@@ -68,7 +68,7 @@ class BotRunner:
 
         _validate_mode_startup(self.settings)
 
-    def run(self, *, once: bool = False) -> None:
+    async def run(self, *, once: bool = False) -> None:
         """Start the bot runner."""
 
         state = self.state_store.load()
@@ -76,16 +76,16 @@ class BotRunner:
         _safe_notify(self.notifier, "send_startup", f"Bot started. mode={self.settings.trading.mode}")
 
         try:
-            ib = self.ib_connection.connect()
+            ib = await self.ib_connection.connect()
             _safe_notify(self.notifier, "send_ib_connected")
 
-            signal_contract = qualify_contract(ib, build_signal_contract(self.settings))
+            signal_contract = await qualify_contract(ib, build_signal_contract(self.settings))
 
             if self.settings.trading.mode == LIVE_MODE:
-                self._run_live_preflight_and_stop(ib=ib, signal_contract=signal_contract, state=state)
+                await self._run_live_preflight_and_stop(ib=ib, signal_contract=signal_contract, state=state)
                 return
 
-            self._run_loop(ib=ib, signal_contract=signal_contract, state=state, once=once)
+            await self._run_loop(ib=ib, signal_contract=signal_contract, state=state, once=once)
         except KeyboardInterrupt:
             self.logger.info("Bot interrupted by user.")
         except Exception as exc:
@@ -94,11 +94,11 @@ class BotRunner:
         finally:
             self._shutdown()
 
-    def _run_loop(self, *, ib: Any, signal_contract: Any, state: BotState, once: bool) -> None:
+    async def _run_loop(self, *, ib: Any, signal_contract: Any, state: BotState, once: bool) -> None:
         while True:
             state = self.state_store.load()
             try:
-                state = self._run_cycle(ib=ib, signal_contract=signal_contract, state=state)
+                state = await self._run_cycle(ib=ib, signal_contract=signal_contract, state=state)
                 self.health_monitor.clear_errors()
             except Exception:
                 error_check = self.health_monitor.record_error()
@@ -110,10 +110,10 @@ class BotRunner:
             if once:
                 return
 
-            time.sleep(self.settings.runtime.poll_seconds)
+            await asyncio.sleep(self.settings.runtime.poll_seconds)
 
-    def _run_cycle(self, *, ib: Any, signal_contract: Any, state: BotState) -> BotState:
-        candles = MarketDataClient(ib).fetch_historical_bars(signal_contract)
+    async def _run_cycle(self, *, ib: Any, signal_contract: Any, state: BotState) -> BotState:
+        candles = await MarketDataClient(ib).fetch_historical_bars(signal_contract)
         candle_store = CandleStore(latest_processed_candle_ts=state.last_processed_candle_ts)
         update = candle_store.update(candles)
 
@@ -156,7 +156,7 @@ class BotRunner:
             return state
 
         if self.settings.trading.mode == PAPER_MODE:
-            state = self._handle_paper_signal(ib=ib, signal=signal, state=state)
+            state = await self._handle_paper_signal(ib=ib, signal=signal, state=state)
             self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_closed_ts)
             return state
 
@@ -195,9 +195,9 @@ class BotRunner:
             timestamp=signal.timestamp,
         )
 
-    def _handle_paper_signal(self, *, ib: Any, signal: Signal, state: BotState) -> BotState:
+    async def _handle_paper_signal(self, *, ib: Any, signal: Signal, state: BotState) -> BotState:
         self.emergency_stop.assert_trading_allowed(state)
-        account_snapshot = AccountReader(ib).read_snapshot()
+        account_snapshot = await AccountReader(ib).read_snapshot()
         risk_decision = RiskManager(self.settings).evaluate_signal(
             signal,
             account_snapshot,
@@ -223,11 +223,11 @@ class BotRunner:
             raw_json=asdict(trade_plan),
         )
 
-        execution_contract = qualify_contract(
+        execution_contract = await qualify_contract(
             ib,
             build_execution_contract(self.settings, trade_plan.execution_side),
         )
-        result = OrderManager(
+        result = await OrderManager(
             self.settings,
             ib,
             state_store=self.state_store,
@@ -240,10 +240,10 @@ class BotRunner:
         self.state_store.save(updated_state)
         return updated_state
 
-    def _run_live_preflight_and_stop(self, *, ib: Any, signal_contract: Any, state: BotState) -> None:
-        candles = MarketDataClient(ib).fetch_historical_bars(signal_contract)
+    async def _run_live_preflight_and_stop(self, *, ib: Any, signal_contract: Any, state: BotState) -> None:
+        candles = await MarketDataClient(ib).fetch_historical_bars(signal_contract)
         candle_store = CandleStore(candles, latest_processed_candle_ts=state.last_processed_candle_ts)
-        account_snapshot = AccountReader(ib).read_snapshot()
+        account_snapshot = await AccountReader(ib).read_snapshot()
         health_report = self._run_health_checks(
             ib=ib,
             state=state,

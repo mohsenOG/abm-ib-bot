@@ -546,7 +546,7 @@ ib\_gateway/
 
 ```text
 
-connect to TWS or IB Gateway using ib\_insync
+connect to TWS or IB Gateway using ib\_async
 
 disconnect cleanly
 

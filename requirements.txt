@@ -1,6 +1,5 @@
-ib_insync
+ib_async
 pandas
 python-dotenv
 python-telegram-bot
 PyYAML
-

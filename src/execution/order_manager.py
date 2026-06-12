@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -77,8 +78,9 @@ class OrderManager:
         self._notifier = notifier
         self._builder = order_builder or OrderBuilder(account_id=getattr(getattr(settings, "ib", None), "account_id", None))
         self._logger = get_logger("execution.order_manager")
+        self._seen_order_events: set[str] = set()
 
-    def submit_trade_plan(
+    async def submit_trade_plan(
         self,
         *,
         contract: Any,
@@ -99,7 +101,7 @@ class OrderManager:
             order_type=order_type,
             limit_price=limit_price,
         )
-        return self.submit_order_set(
+        return await self.submit_order_set(
             contract=contract,
             trade_plan=trade_plan,
             order_set=order_set,
@@ -107,7 +109,7 @@ class OrderManager:
             ib=ib,
         )
 
-    def submit_order_set(
+    async def submit_order_set(
         self,
         *,
         contract: Any,
@@ -144,10 +146,17 @@ class OrderManager:
             self._logger.exception("Paper order submission failed.")
             raise OrderManagerError("Failed to submit paper order to Interactive Brokers.") from exc
 
+        self._attach_trade_event_handlers(trade, trade_plan, current_state)
+        await asyncio.sleep(0)
+
         status = _managed_status(trade, trade_plan)
-        updated_state = self._update_state_after_status(current_state, trade_plan, status)
-        self._record_status(status, trade_plan)
-        self._notify_status(status, trade_plan)
+        updated_state = self._process_status_update(
+            status,
+            trade_plan,
+            current_state,
+            source="submit",
+            force=True,
+        )
 
         self._logger.info(
             "Paper order submitted. signal_id=%s order_id=%s perm_id=%s status=%s",
@@ -295,6 +304,71 @@ class OrderManager:
         elif status.status in {"Inactive", "Rejected"}:
             _safe_notify(self._notifier, "send_order_rejected", order_id=status.order_id, reason=status.status)
 
+    def _attach_trade_event_handlers(self, trade: Any, trade_plan: Any, state: BotState | None) -> None:
+        """Attach event handlers to persist order updates from ib_async Trade events."""
+
+        def on_status_update(*args: Any) -> None:
+            updated_trade = _event_trade_arg(args, trade)
+            status = _managed_status(updated_trade, trade_plan)
+            self._process_status_update(status, trade_plan, state, source="status_event")
+
+        def on_fill_update(*args: Any) -> None:
+            updated_trade = _event_trade_arg(args, trade)
+            status = _managed_status(updated_trade, trade_plan)
+            self._process_status_update(status, trade_plan, state, source="fill_event")
+
+        _add_event_handler(getattr(trade, "statusEvent", None), on_status_update, self._logger)
+        _add_event_handler(getattr(trade, "fillEvent", None), on_fill_update, self._logger)
+        _add_event_handler(getattr(trade, "filledEvent", None), on_fill_update, self._logger)
+        _add_event_handler(getattr(trade, "cancelledEvent", None), on_status_update, self._logger)
+
+    def _process_status_update(
+        self,
+        status: ManagedOrderStatus,
+        trade_plan: Any | None,
+        state: BotState | None,
+        *,
+        source: str,
+        force: bool = False,
+    ) -> BotState | None:
+        event_key = _status_event_key(status)
+        if not force and self._is_duplicate_status_event(event_key, status, state):
+            self._logger.debug(
+                "Duplicate order status event skipped. source=%s order_id=%s status=%s",
+                source,
+                status.order_id,
+                status.status,
+            )
+            return state
+
+        self._seen_order_events.add(event_key)
+        updated_state = self._update_state_after_status(state, trade_plan, status)
+        self._record_status(status, trade_plan)
+        self._notify_status(status, trade_plan)
+        return updated_state
+
+    def _is_duplicate_status_event(
+        self,
+        event_key: str,
+        status: ManagedOrderStatus,
+        state: BotState | None,
+    ) -> bool:
+        if event_key in self._seen_order_events:
+            return True
+
+        if state is None:
+            return False
+
+        active_trade = state.active_trade
+        return (
+            _optional_int_payload(active_trade, "order_id") == status.order_id
+            and _optional_int_payload(active_trade, "perm_id") == status.perm_id
+            and str(active_trade.get("status", "") or "") == status.status
+            and float(active_trade.get("filled", 0.0) or 0.0) == status.filled
+            and float(active_trade.get("remaining", 0.0) or 0.0) == status.remaining
+            and float(active_trade.get("avg_fill_price", 0.0) or 0.0) == status.avg_fill_price
+        )
+
 
 def _managed_status(trade: Any, trade_plan: Any | None) -> ManagedOrderStatus:
     order = getattr(trade, "order", None)
@@ -312,6 +386,34 @@ def _managed_status(trade: Any, trade_plan: Any | None) -> ManagedOrderStatus:
         remaining=_float_attr(order_status, "remaining"),
         avg_fill_price=_float_attr(order_status, "avgFillPrice"),
         signal_id=_optional_text_attr(trade_plan, "signal_id") if trade_plan is not None else None,
+    )
+
+
+def _event_trade_arg(args: tuple[Any, ...], fallback_trade: Any) -> Any:
+    if args and hasattr(args[0], "orderStatus"):
+        return args[0]
+    return fallback_trade
+
+
+def _add_event_handler(event: Any, handler: Any, logger: Any) -> None:
+    if event is None:
+        return
+    try:
+        event += handler
+    except Exception as exc:
+        logger.warning("Could not attach ib_async trade event handler: %s", exc)
+
+
+def _status_event_key(status: ManagedOrderStatus) -> str:
+    return ":".join(
+        (
+            str(status.order_id or ""),
+            str(status.perm_id or ""),
+            status.status,
+            str(status.filled),
+            str(status.remaining),
+            str(status.avg_fill_price),
+        )
     )
 
 
@@ -391,6 +493,14 @@ def _float_attr(source: Any, name: str) -> float:
 
 def _optional_int_attr(source: Any, name: str) -> int | None:
     value = getattr(source, name, None)
+    if value is None:
+        return None
+    int_value = int(value)
+    return int_value if int_value > 0 else None
+
+
+def _optional_int_payload(source: dict[str, Any], name: str) -> int | None:
+    value = source.get(name)
     if value is None:
         return None
     int_value = int(value)

@@ -94,16 +94,16 @@ class AccountReader:
         self._ib_client = ib_client
         self._logger = get_logger("ib_gateway.account")
 
-    def read_snapshot(self, *, include_executions: bool = True) -> AccountSnapshot:
+    async def read_snapshot(self, *, include_executions: bool = True) -> AccountSnapshot:
         """Read a full account snapshot from the connected IB client."""
 
         self._logger.info("Reading IB account snapshot.")
         return AccountSnapshot(
             read_at=datetime.now(timezone.utc).isoformat(),
             account_values=self.read_account_values(),
-            positions=self.read_positions(),
-            open_orders=self.read_open_orders(),
-            executions=self.read_executions() if include_executions else (),
+            positions=await self.read_positions(),
+            open_orders=await self.read_open_orders(),
+            executions=await self.read_executions() if include_executions else (),
         )
 
     def read_account_values(self) -> tuple[AccountValueSnapshot, ...]:
@@ -118,36 +118,36 @@ class AccountReader:
 
         return tuple(_account_value_snapshot(value) for value in values)
 
-    def read_positions(self) -> tuple[PositionSnapshot, ...]:
+    async def read_positions(self) -> tuple[PositionSnapshot, ...]:
         """Return normalized current positions."""
 
         ib = self._connected_ib()
         try:
-            positions = ib.positions()
+            positions = await ib.reqPositionsAsync()
         except Exception as exc:
             self._logger.exception("Failed to read IB positions.")
             raise AccountReadError("Failed to read Interactive Brokers positions.") from exc
 
         return tuple(_position_snapshot(position) for position in positions)
 
-    def read_open_orders(self) -> tuple[OpenOrderSnapshot, ...]:
+    async def read_open_orders(self) -> tuple[OpenOrderSnapshot, ...]:
         """Return normalized open orders without submitting or changing orders."""
 
         ib = self._connected_ib()
         try:
-            open_trades = ib.reqOpenOrders()
+            open_trades = await ib.reqOpenOrdersAsync()
         except Exception as exc:
             self._logger.exception("Failed to read IB open orders.")
             raise AccountReadError("Failed to read Interactive Brokers open orders.") from exc
 
         return tuple(_open_order_snapshot(trade) for trade in open_trades)
 
-    def read_executions(self) -> tuple[ExecutionSnapshot, ...]:
+    async def read_executions(self) -> tuple[ExecutionSnapshot, ...]:
         """Return normalized recent executions available from IB."""
 
         ib = self._connected_ib()
         try:
-            fills = ib.reqExecutions()
+            fills = await ib.reqExecutionsAsync()
         except Exception as exc:
             self._logger.exception("Failed to read IB executions.")
             raise AccountReadError("Failed to read Interactive Brokers executions.") from exc
@@ -178,7 +178,16 @@ def _resolve_ib_client(ib_client: Any) -> Any:
 
 
 def _looks_like_ib_client(value: Any) -> bool:
-    return all(callable(getattr(value, name, None)) for name in ("accountValues", "positions", "isConnected"))
+    return all(
+        callable(getattr(value, name, None))
+        for name in (
+            "accountValues",
+            "reqPositionsAsync",
+            "reqOpenOrdersAsync",
+            "reqExecutionsAsync",
+            "isConnected",
+        )
+    )
 
 
 def _account_value_snapshot(value: Any) -> AccountValueSnapshot:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from ib_insync import LimitOrder, MarketOrder, Order, StopOrder
+from ib_async import LimitOrder, MarketOrder, Order, StopOrder
 
 
 OrderAction = Literal["BUY", "SELL"]

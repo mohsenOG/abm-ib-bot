@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from ib_insync import Commodity, Contract
+from ib_async import Commodity, Contract
 
 from logging_setup.logger import get_logger
 
@@ -87,7 +87,7 @@ def build_execution_contract(settings: Any, side: ExecutionSide) -> Contract:
     return contract
 
 
-def qualify_contract(ib: Any, contract: Contract) -> Contract:
+async def qualify_contract(ib: Any, contract: Contract) -> Contract:
     """Qualify a contract through IB and return the single qualified result."""
 
     logger = get_logger("ib_gateway.contracts")
@@ -104,7 +104,7 @@ def qualify_contract(ib: Any, contract: Contract) -> Contract:
     )
 
     try:
-        qualified = ib.qualifyContracts(contract)
+        qualified = await ib.qualifyContractsAsync(contract)
     except Exception as exc:
         logger.exception("IB contract qualification failed.")
         raise ContractQualificationError("Failed to qualify Interactive Brokers contract.") from exc

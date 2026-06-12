@@ -232,7 +232,7 @@ Do not trade when emergency stop is active.
 
 
 
-Use `ib\_insync` unless explicitly instructed otherwise.
+Use `ib\_async` unless explicitly instructed otherwise.
 
 
 

@@ -43,8 +43,8 @@ risk:
   max_concurrent_position_slots: 1
 
 strategy:
-  bias_threshold: 0.5
-  use_heikin_ashi: false
+  bias_threshold: 0.2
+  use_heikin_ashi: true
 
 runtime:
   poll_seconds: 300
