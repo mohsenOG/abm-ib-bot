@@ -37,6 +37,7 @@ strategy:
 
 runtime:
   poll_seconds: 300
+  active_trade_monitor_seconds: 10
 
 live:
   enabled: false

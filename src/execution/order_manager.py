@@ -680,6 +680,17 @@ def _active_trade_payload(trade_plan: Any | None, status: ManagedOrderStatus) ->
                 "product_tp_pct": getattr(trade_plan, "product_tp_pct", None),
             }
         )
+        product = getattr(trade_plan, "product", None)
+        if product is not None:
+            payload.update(
+                {
+                    "product_asset_class": getattr(product, "asset_class", None),
+                    "product_con_id": getattr(product, "con_id", None),
+                    "product_local_symbol": getattr(product, "local_symbol", None),
+                    "product_exchange": getattr(product, "exchange", None),
+                    "product_currency": getattr(product, "currency", None),
+                }
+            )
 
     return payload
 

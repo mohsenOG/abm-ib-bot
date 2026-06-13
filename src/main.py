@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from ib_gateway.connection import IBConnection
 from ib_gateway.contracts import build_execution_product_contract, build_signal_contract, qualify_contract
 from logging_setup.logger import get_logger, setup_logging
 from monitoring.account_guard import AccountGuard, AccountGuardError, configured_account_id
+from monitoring.active_trade_monitor import ActiveTradeMonitor
 from monitoring.emergency_stop import EmergencyStop
 from monitoring.health import HealthMonitor, HealthReport
 from monitoring.live_mode import LiveModeGate, LiveModeGateError
@@ -98,22 +100,42 @@ class BotRunner:
             self._shutdown()
 
     async def _run_loop(self, *, ib: Any, signal_contract: Any, state: BotState, once: bool) -> None:
-        while True:
-            state = self.state_store.load()
-            try:
-                state = await self._run_cycle(ib=ib, signal_contract=signal_contract, state=state)
-                self.health_monitor.clear_errors()
-            except Exception:
-                error_check = self.health_monitor.record_error()
-                self.logger.exception("Bot cycle failed. repeated_errors=%s", self.health_monitor.repeated_errors)
-                if error_check.level == "critical":
-                    self.emergency_stop.activate("Repeated bot cycle errors reached the configured limit.", state=state)
-                raise
+        monitor_task = self._create_active_trade_monitor_task(ib=ib, once=once)
+        try:
+            while True:
+                state = self.state_store.load()
+                try:
+                    state = await self._run_cycle(ib=ib, signal_contract=signal_contract, state=state)
+                    self.health_monitor.clear_errors()
+                except Exception:
+                    error_check = self.health_monitor.record_error()
+                    self.logger.exception("Bot cycle failed. repeated_errors=%s", self.health_monitor.repeated_errors)
+                    if error_check.level == "critical":
+                        self.emergency_stop.activate("Repeated bot cycle errors reached the configured limit.", state=state)
+                    raise
 
-            if once:
-                return
+                if once:
+                    return
 
-            await asyncio.sleep(self.settings.runtime.poll_seconds)
+                await asyncio.sleep(self.settings.runtime.poll_seconds)
+        finally:
+            if monitor_task is not None:
+                monitor_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await monitor_task
+
+    def _create_active_trade_monitor_task(self, *, ib: Any, once: bool) -> asyncio.Task[Any] | None:
+        if once or self.settings.trading.mode != PAPER_MODE:
+            return None
+
+        monitor = ActiveTradeMonitor(
+            self.settings,
+            ib,
+            state_store=self.state_store,
+            notifier=self.notifier,
+            emergency_stop=self.emergency_stop,
+        )
+        return asyncio.create_task(monitor.run_forever(), name="active-trade-monitor")
 
     async def _run_cycle(self, *, ib: Any, signal_contract: Any, state: BotState) -> BotState:
         candles = await MarketDataClient(ib).fetch_historical_bars(signal_contract)

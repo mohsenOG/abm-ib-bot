@@ -98,6 +98,7 @@ class StrategySettings:
 @dataclass(frozen=True)
 class RuntimeSettings:
     poll_seconds: int
+    active_trade_monitor_seconds: int
 
 
 @dataclass(frozen=True)
@@ -476,11 +477,22 @@ def _load_strategy(raw: dict[str, Any]) -> StrategySettings:
 def _load_runtime(raw: dict[str, Any]) -> RuntimeSettings:
     section = _required_section(raw, "runtime")
     poll_seconds = _required_int(section, "poll_seconds", "runtime.poll_seconds")
+    active_trade_monitor_seconds = _optional_int(
+        section,
+        "active_trade_monitor_seconds",
+        "runtime.active_trade_monitor_seconds",
+        10,
+    )
 
     if poll_seconds <= 0:
         raise SettingsValidationError("runtime.poll_seconds must be greater than zero.")
+    if active_trade_monitor_seconds < 5 or active_trade_monitor_seconds > 15:
+        raise SettingsValidationError("runtime.active_trade_monitor_seconds must be between 5 and 15.")
 
-    return RuntimeSettings(poll_seconds=poll_seconds)
+    return RuntimeSettings(
+        poll_seconds=poll_seconds,
+        active_trade_monitor_seconds=active_trade_monitor_seconds,
+    )
 
 
 def _load_live(raw: dict[str, Any]) -> LiveModeSettings:
