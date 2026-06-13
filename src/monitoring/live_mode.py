@@ -8,6 +8,7 @@ from typing import Any
 from logging_setup.logger import get_logger
 from monitoring.account_guard import account_guard_failures, configured_account_id, snapshot_accounts
 from monitoring.health import HealthReport
+from monitoring.reconciliation import account_reconciliation_failures
 from state.state_store import BotState
 
 
@@ -80,17 +81,7 @@ class LiveModeGate:
         )
 
     def _reconciliation_failures(self, account_snapshot: Any, state: BotState) -> list[str]:
-        failures: list[str] = []
-
-        unknown_orders = _unknown_active_open_orders(account_snapshot, state)
-        if unknown_orders:
-            failures.append(f"unknown active open orders exist: {', '.join(unknown_orders)}")
-
-        active_positions = _active_positions(account_snapshot)
-        if active_positions:
-            failures.append(f"open positions require manual reconciliation: {', '.join(active_positions)}")
-
-        return failures
+        return account_reconciliation_failures(account_snapshot=account_snapshot, state=state)
 
     def _telegram_failure(self) -> str | None:
         allow_failure = getattr(getattr(self._settings, "live", None), "allow_telegram_failure", False)
@@ -120,51 +111,3 @@ class LiveModeGate:
             return "Telegram live check failed"
 
         return None
-
-
-def _unknown_active_open_orders(account_snapshot: Any, state: BotState) -> list[str]:
-    unknown: list[str] = []
-    known_order_ids = set(state.known_order_ids)
-    known_perm_ids = set(state.known_perm_ids)
-
-    for order in getattr(account_snapshot, "open_orders", ()):
-        if not _is_active_order(order):
-            continue
-
-        order_id = getattr(order, "order_id", None)
-        perm_id = getattr(order, "perm_id", None)
-        known_by_order_id = isinstance(order_id, int) and order_id in known_order_ids
-        known_by_perm_id = isinstance(perm_id, int) and perm_id in known_perm_ids
-
-        if not known_by_order_id and not known_by_perm_id:
-            unknown.append(_order_label(order))
-
-    return unknown
-
-
-def _active_positions(account_snapshot: Any) -> list[str]:
-    active: list[str] = []
-    for position in getattr(account_snapshot, "positions", ()):
-        quantity = float(getattr(position, "position", 0.0) or 0.0)
-        if quantity != 0.0:
-            active.append(_position_label(position, quantity))
-    return active
-
-
-def _is_active_order(order: Any) -> bool:
-    status = str(getattr(order, "status", "") or "")
-    remaining = float(getattr(order, "remaining", 0.0) or 0.0)
-    return status in {"PendingSubmit", "PreSubmitted", "Submitted", "PartiallyFilled"} and remaining > 0.0
-
-
-def _order_label(order: Any) -> str:
-    order_id = getattr(order, "order_id", None)
-    perm_id = getattr(order, "perm_id", None)
-    local_symbol = str(getattr(order, "local_symbol", "") or "")
-    return f"order_id={order_id} perm_id={perm_id} local_symbol={local_symbol}"
-
-
-def _position_label(position: Any, quantity: float) -> str:
-    con_id = getattr(position, "con_id", None)
-    local_symbol = str(getattr(position, "local_symbol", "") or "")
-    return f"con_id={con_id} local_symbol={local_symbol} quantity={quantity}"

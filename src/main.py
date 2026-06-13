@@ -23,6 +23,7 @@ from monitoring.active_trade_monitor import ActiveTradeMonitor
 from monitoring.emergency_stop import EmergencyStop
 from monitoring.health import HealthMonitor, HealthReport
 from monitoring.live_mode import LiveModeGate, LiveModeGateError
+from monitoring.reconciliation import AccountReconciliationError, AccountReconciliationGate
 from notifications.notifier import TelegramNotifier
 from risk.risk_manager import RiskManager, TradePlan
 from state.state_store import BotState, StateStore
@@ -83,7 +84,7 @@ class BotRunner:
             ib = await self.ib_connection.connect()
             _safe_notify(self.notifier, "send_ib_connected")
 
-            await self._run_account_guard(ib=ib)
+            await self._run_account_guard(ib=ib, state=state)
             signal_contract = await qualify_contract(ib, build_signal_contract(self.settings))
 
             if self.settings.trading.mode == LIVE_MODE:
@@ -227,7 +228,7 @@ class BotRunner:
 
     async def _handle_paper_signal(self, *, ib: Any, signal: Signal, state: BotState) -> BotState:
         self.emergency_stop.assert_trading_allowed(state)
-        account_snapshot = await AccountReader(ib).read_snapshot()
+        account_snapshot = await AccountReader(ib, client_id=self.settings.ib.client_id).read_snapshot()
         try:
             selected_product, execution_contract = await ProductSelector(self.settings, ib).select_for_signal(signal.side)
         except ProductSelectionError as exc:
@@ -282,7 +283,7 @@ class BotRunner:
     async def _run_live_preflight_and_stop(self, *, ib: Any, signal_contract: Any, state: BotState) -> None:
         candles = await MarketDataClient(ib).fetch_historical_bars(signal_contract)
         candle_store = CandleStore(candles, latest_processed_candle_ts=state.last_processed_candle_ts)
-        account_snapshot = await AccountReader(ib).read_snapshot()
+        account_snapshot = await AccountReader(ib, client_id=self.settings.ib.client_id).read_snapshot()
         health_report = self._run_health_checks(
             ib=ib,
             state=state,
@@ -296,14 +297,20 @@ class BotRunner:
         )
         raise LiveModeGateError("Live mode readiness checks passed, but live execution is not enabled in this task.")
 
-    async def _run_account_guard(self, *, ib: Any) -> None:
+    async def _run_account_guard(self, *, ib: Any, state: BotState) -> None:
         if self.settings.trading.mode not in {PAPER_MODE, LIVE_MODE}:
             return
 
-        account_snapshot = await AccountReader(ib).read_snapshot(include_executions=False)
+        if self.settings.ib.client_id != 0:
+            raise BotRunnerError(
+                "IB client_id must be 0 in paper/live mode so manual TWS orders can be bound and reconciled."
+            )
+
+        account_snapshot = await AccountReader(ib, client_id=self.settings.ib.client_id).read_snapshot()
         try:
             AccountGuard(self.settings).run_startup_checks(account_snapshot=account_snapshot)
-        except AccountGuardError as exc:
+            AccountReconciliationGate().run_startup_checks(account_snapshot=account_snapshot, state=state)
+        except (AccountGuardError, AccountReconciliationError) as exc:
             raise BotRunnerError(f"IB account safety check failed: {exc}.") from exc
 
     def _run_health_checks(

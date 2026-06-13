@@ -129,6 +129,12 @@ class RiskManager:
         if normalized_signal.side == "SELL" and not self._settings.trading.allowed_directions.short:
             return _blocked("Short trades are disabled by trading.allowed_directions.short.")
 
+        if _has_unmatched_active_position(account_snapshot, product):
+            return _blocked("An active broker position exists outside the selected execution product.")
+
+        if _has_unmatched_active_order(account_snapshot, product):
+            return _blocked("An active broker order exists outside the selected execution product.")
+
         active_position_slots = _count_active_position_slots(account_snapshot, product)
         active_order_slots = _count_active_order_slots(account_snapshot, product)
         active_slots = active_position_slots + active_order_slots
@@ -295,6 +301,16 @@ def _count_active_position_slots(account_snapshot: Any, product: ExecutionProduc
 def _count_active_order_slots(account_snapshot: Any, product: ExecutionProduct) -> int:
     open_orders = getattr(account_snapshot, "open_orders", ())
     return sum(1 for order in open_orders if _is_active_order(order) and _matches_product(order, product))
+
+
+def _has_unmatched_active_position(account_snapshot: Any, product: ExecutionProduct) -> bool:
+    positions = getattr(account_snapshot, "positions", ())
+    return any(_is_active_position(position) and not _matches_product(position, product) for position in positions)
+
+
+def _has_unmatched_active_order(account_snapshot: Any, product: ExecutionProduct) -> bool:
+    open_orders = getattr(account_snapshot, "open_orders", ())
+    return any(_is_active_order(order) and not _matches_product(order, product) for order in open_orders)
 
 
 def _is_active_position(position: Any) -> bool:

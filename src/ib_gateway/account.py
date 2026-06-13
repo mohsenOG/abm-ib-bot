@@ -91,8 +91,9 @@ class AccountSnapshot:
 class AccountReader:
     """Read account values, positions, open orders, and executions from IB."""
 
-    def __init__(self, ib_client: Any) -> None:
+    def __init__(self, ib_client: Any, *, client_id: int | None = None) -> None:
         self._ib_client = ib_client
+        self._client_id = client_id
         self._logger = get_logger("ib_gateway.account")
 
     async def read_snapshot(self, *, include_executions: bool = True) -> AccountSnapshot:
@@ -145,11 +146,17 @@ class AccountReader:
         return tuple(_position_snapshot(position) for position in positions)
 
     async def read_open_orders(self) -> tuple[OpenOrderSnapshot, ...]:
-        """Return normalized open orders without submitting or changing orders."""
+        """Return normalized open orders using all-open-order coverage."""
 
         ib = self._connected_ib()
         try:
-            open_trades = await ib.reqOpenOrdersAsync()
+            if self._client_id == 0:
+                auto_bind = getattr(ib, "reqAutoOpenOrders", None)
+                if not callable(auto_bind):
+                    raise AccountReadError("Interactive Brokers client cannot bind manual TWS orders.")
+                auto_bind(True)
+
+            open_trades = await ib.reqAllOpenOrdersAsync()
         except Exception as exc:
             self._logger.exception("Failed to read IB open orders.")
             raise AccountReadError("Failed to read Interactive Brokers open orders.") from exc
@@ -198,7 +205,7 @@ def _looks_like_ib_client(value: Any) -> bool:
             "accountValues",
             "managedAccounts",
             "reqPositionsAsync",
-            "reqOpenOrdersAsync",
+            "reqAllOpenOrdersAsync",
             "reqExecutionsAsync",
             "isConnected",
         )
