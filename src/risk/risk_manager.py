@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from config.settings import AppSettings, RiskSettings
@@ -107,7 +109,13 @@ class RiskManager:
         if selected_product is None:
             return _blocked("No selected execution product was provided.")
         product = _normalize_product(selected_product)
-        effective_product_price = product_price if product_price is not None else product.ask
+        quote_error = _validate_product_quote(
+            product,
+            max_age_seconds=self._settings.execution_products.quote_max_age_seconds,
+        )
+        if quote_error is not None:
+            return _blocked(quote_error)
+        effective_product_price = product.ask
 
         if self._settings.trading.mode == "alert_only":
             return _blocked("Trading mode is alert_only.")
@@ -145,6 +153,14 @@ class RiskManager:
             )
         except RiskSizingError as exc:
             return _blocked(str(exc))
+
+        estimated_value = quantity * effective_product_price
+        if estimated_value > self._settings.execution_products.max_order_value_eur:
+            return _blocked(
+                "Estimated order value exceeds configured max_order_value_eur. "
+                f"value={estimated_value:.6f} "
+                f"max_order_value_eur={self._settings.execution_products.max_order_value_eur}."
+            )
 
         return RiskDecision(
             status="approved",
@@ -237,6 +253,32 @@ def _normalize_product(product: ExecutionProduct) -> ExecutionProduct:
     )
 
 
+def _validate_product_quote(product: ExecutionProduct, *, max_age_seconds: float) -> str | None:
+    if product.ask is None:
+        return "Selected execution product ask price is missing."
+
+    if product.quote_time is None:
+        return "Selected execution product quote timestamp is missing."
+
+    try:
+        quote_time = datetime.fromisoformat(product.quote_time)
+    except ValueError:
+        return "Selected execution product quote timestamp is invalid."
+
+    if quote_time.tzinfo is None:
+        quote_time = quote_time.replace(tzinfo=UTC)
+    else:
+        quote_time = quote_time.astimezone(UTC)
+
+    age_seconds = (datetime.now(UTC) - quote_time).total_seconds()
+    if age_seconds < 0:
+        return "Selected execution product quote timestamp is in the future."
+    if age_seconds > max_age_seconds:
+        return f"Selected execution product quote is stale. age_seconds={age_seconds:.3f} max_age_seconds={max_age_seconds}."
+
+    return None
+
+
 def _execution_side_for_signal(side: SignalSide) -> ExecutionSide:
     return "long" if side == "BUY" else "short"
 
@@ -320,7 +362,7 @@ def _positive_float_attr(source: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise RiskManagerError(f"{name} must be a number.")
     result = float(value)
-    if result <= 0:
+    if not math.isfinite(result) or result <= 0:
         raise RiskManagerError(f"{name} must be greater than zero.")
     return result
 
@@ -337,7 +379,7 @@ def _non_negative_float_attr(source: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise RiskManagerError(f"{name} must be a number.")
     result = float(value)
-    if result < 0:
+    if not math.isfinite(result) or result < 0:
         raise RiskManagerError(f"{name} must be zero or greater.")
     return result
 

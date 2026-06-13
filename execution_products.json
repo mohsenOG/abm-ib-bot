@@ -2,7 +2,7 @@
   "execution_products": {
     "quote_max_age_seconds": 10,
     "max_spread_pct": 2.0,
-    "max_order_value": 100.0,
+    "max_order_value_eur": 100.0,
     "long": [
       {
         "secType": "IOPT",

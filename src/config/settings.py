@@ -73,7 +73,7 @@ class ExecutionProductSettings:
 class ExecutionProductsSettings:
     quote_max_age_seconds: float
     max_spread_pct: float
-    max_order_value: float
+    max_order_value_eur: float
     long: tuple[ExecutionProductSettings, ...]
     short: tuple[ExecutionProductSettings, ...]
 
@@ -339,19 +339,23 @@ def _load_execution_products(project_root: Path) -> ExecutionProductsSettings:
         "execution_products.quote_max_age_seconds",
     )
     max_spread_pct = _required_float(section, "max_spread_pct", "execution_products.max_spread_pct")
-    max_order_value = _required_float(section, "max_order_value", "execution_products.max_order_value")
+    max_order_value_eur = _required_float(
+        section,
+        "max_order_value_eur",
+        "execution_products.max_order_value_eur",
+    )
 
     if quote_max_age_seconds <= 0:
         raise SettingsValidationError("execution_products.quote_max_age_seconds must be greater than zero.")
     if max_spread_pct <= 0:
         raise SettingsValidationError("execution_products.max_spread_pct must be greater than zero.")
-    if max_order_value <= 0:
-        raise SettingsValidationError("execution_products.max_order_value must be greater than zero.")
+    if max_order_value_eur <= 0:
+        raise SettingsValidationError("execution_products.max_order_value_eur must be greater than zero.")
 
     return ExecutionProductsSettings(
         quote_max_age_seconds=quote_max_age_seconds,
         max_spread_pct=max_spread_pct,
-        max_order_value=max_order_value,
+        max_order_value_eur=max_order_value_eur,
         long=_load_execution_product_side(section, "long"),
         short=_load_execution_product_side(section, "short"),
     )

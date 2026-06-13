@@ -121,7 +121,10 @@ class ProductSelector:
                 quantity_rules=self._quantity_rules,
             )
             order_value = quantity * quote.ask
-            _validate_order_value(order_value, max_order_value=self._settings.execution_products.max_order_value)
+            _validate_order_value(
+                order_value,
+                max_order_value_eur=self._settings.execution_products.max_order_value_eur,
+            )
             commission_pct = await self._commission_pct(
                 qualified_contract,
                 quantity=quantity,
@@ -296,11 +299,11 @@ def _validate_spread(product: ExecutionProductSettings, quote: ProductQuote, *, 
         )
 
 
-def _validate_order_value(order_value: float, *, max_order_value: float) -> None:
-    if order_value > max_order_value:
+def _validate_order_value(order_value: float, *, max_order_value_eur: float) -> None:
+    if order_value > max_order_value_eur:
         raise ProductSelectionError(
-            f"Estimated order value exceeds configured max_order_value. value={order_value:.6f} "
-            f"max_order_value={max_order_value}."
+            f"Estimated order value exceeds configured max_order_value_eur. value={order_value:.6f} "
+            f"max_order_value_eur={max_order_value_eur}."
         )
 
 

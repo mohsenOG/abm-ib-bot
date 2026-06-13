@@ -33,8 +33,8 @@ def calculate_quantity(
 ) -> float:
     """Calculate a simple order quantity for a selected derivative product.
 
-    When no product price is known before execution, return the configured
-    minimum quantity. The bought market price can be recorded later from fills.
+    A validated product price is required so sizing stays tied to the
+    intended capital allocation.
     """
 
     rules = quantity_rules or QuantityRules()
@@ -42,7 +42,7 @@ def calculate_quantity(
     capital = _positive_decimal(capital_per_position, "capital_per_position")
 
     if product_price is None:
-        return _quantity_result(rules.min_quantity, rules)
+        raise RiskSizingError("product_price is required to calculate quantity.")
 
     price = _positive_decimal(product_price, "product_price")
     raw_quantity = capital / price
