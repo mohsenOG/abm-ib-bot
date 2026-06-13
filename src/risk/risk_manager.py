@@ -185,7 +185,7 @@ def _execution_side_for_signal(side: SignalSide) -> ExecutionSide:
 
 
 def _order_action_for_signal(side: SignalSide) -> OrderAction:
-    return "BUY" if side == "BUY" else "SELL"
+    return "BUY"
 
 
 def _count_active_position_slots(account_snapshot: Any, product: ExecutionProduct) -> int:
