@@ -45,6 +45,17 @@ class TradePlan:
     quantity: float
     capital_allocated: float
     signal_price: float
+    underlying_symbol: str
+    underlying_entry_price: float
+    atr: float
+    atr_pct: float
+    underlying_sl_price: float
+    underlying_tp_price: float
+    underlying_sl_pct: float
+    underlying_tp_pct: float
+    product_leverage: float
+    product_sl_pct: float
+    product_tp_pct: float
     product_price: float | None
     product: ExecutionProduct
 
@@ -109,6 +120,9 @@ class RiskManager:
         if active_slots >= self._risk.max_concurrent_position_slots:
             return _blocked("No position slots are available.")
 
+        if normalized_signal.product_sl_pct >= 100:
+            return _blocked("Product stop-loss percentage is 100% or greater; protective stop price would be invalid.")
+
         try:
             quantity = calculate_quantity(
                 self._risk.capital_per_position,
@@ -130,6 +144,17 @@ class RiskManager:
                 quantity=quantity,
                 capital_allocated=self._risk.capital_per_position,
                 signal_price=normalized_signal.price,
+                underlying_symbol=normalized_signal.underlying_symbol,
+                underlying_entry_price=normalized_signal.underlying_entry_price,
+                atr=normalized_signal.atr,
+                atr_pct=normalized_signal.atr_pct,
+                underlying_sl_price=normalized_signal.underlying_sl_price,
+                underlying_tp_price=normalized_signal.underlying_tp_price,
+                underlying_sl_pct=normalized_signal.underlying_sl_pct,
+                underlying_tp_pct=normalized_signal.underlying_tp_pct,
+                product_leverage=normalized_signal.product_leverage,
+                product_sl_pct=normalized_signal.product_sl_pct,
+                product_tp_pct=normalized_signal.product_tp_pct,
                 product_price=product_price,
                 product=product,
             ),
@@ -151,6 +176,17 @@ class _NormalizedSignal:
     timestamp: str
     side: SignalSide
     price: float
+    underlying_symbol: str
+    underlying_entry_price: float
+    atr: float
+    atr_pct: float
+    underlying_sl_price: float
+    underlying_tp_price: float
+    underlying_sl_pct: float
+    underlying_tp_pct: float
+    product_leverage: float
+    product_sl_pct: float
+    product_tp_pct: float
 
 
 def _normalize_signal(signal: Any) -> _NormalizedSignal:
@@ -158,6 +194,7 @@ def _normalize_signal(signal: Any) -> _NormalizedSignal:
     timestamp = _required_text_attr(signal, "timestamp")
     raw_side = _required_text_attr(signal, "side").upper()
     price = _positive_float_attr(signal, "price")
+    product_sl_pct = _positive_float_attr(signal, "product_sl_pct")
 
     if raw_side not in {"BUY", "SELL"}:
         raise RiskManagerError("signal.side must be BUY or SELL.")
@@ -167,6 +204,17 @@ def _normalize_signal(signal: Any) -> _NormalizedSignal:
         timestamp=timestamp,
         side=raw_side,  # type: ignore[arg-type]
         price=price,
+        underlying_symbol=_required_text_attr(signal, "underlying_symbol"),
+        underlying_entry_price=_positive_float_attr(signal, "underlying_entry_price"),
+        atr=_positive_float_attr(signal, "atr"),
+        atr_pct=_positive_float_attr(signal, "atr_pct"),
+        underlying_sl_price=_positive_float_attr(signal, "underlying_sl_price"),
+        underlying_tp_price=_positive_float_attr(signal, "underlying_tp_price"),
+        underlying_sl_pct=_positive_float_attr(signal, "underlying_sl_pct"),
+        underlying_tp_pct=_positive_float_attr(signal, "underlying_tp_pct"),
+        product_leverage=_positive_float_attr(signal, "product_leverage"),
+        product_sl_pct=product_sl_pct,
+        product_tp_pct=_positive_float_attr(signal, "product_tp_pct"),
     )
 
 

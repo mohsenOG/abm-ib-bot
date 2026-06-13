@@ -17,6 +17,7 @@ MACD_PERIODS = (
 )
 BOLLINGER_PERIOD = 20
 BOLLINGER_STDDEV_MULTIPLIER = 2.0
+DEFAULT_ATR_PERIOD = 14
 ROC_PERIODS = (13, 27)
 BREAKOUT_PERIODS = (5, 17, 21)
 
@@ -25,12 +26,23 @@ class IndicatorError(ValueError):
     """Raised when indicators cannot be calculated safely."""
 
 
-def add_indicators(candles: pd.DataFrame, use_heikin_ashi: bool) -> pd.DataFrame:
+def add_indicators(
+    candles: pd.DataFrame,
+    use_heikin_ashi: bool,
+    *,
+    atr_period: int = DEFAULT_ATR_PERIOD,
+) -> pd.DataFrame:
     """Return a new DataFrame with all indicators required by the ABM strategy."""
 
     result = _prepare_candles(candles)
     result = _add_heikin_ashi_columns(result)
     result = _add_source_columns(result, use_heikin_ashi)
+    result[f"atr_{atr_period}"] = calculate_atr(
+        result["src_high"],
+        result["src_low"],
+        result["src_close"],
+        atr_period,
+    )
 
     for period in EMA_PERIODS:
         result[f"ema_{period}"] = calculate_ema(result["src_close"], period)
@@ -158,6 +170,34 @@ def calculate_roc(series: pd.Series, period: int) -> pd.Series:
     _validate_positive_period(period, "period")
     previous = series.shift(period)
     return (series - previous) / previous * 100
+
+
+def calculate_atr(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    period: int,
+) -> pd.Series:
+    """Calculate Average True Range using Wilder-style smoothing."""
+
+    _validate_positive_period(period, "period")
+    true_range = calculate_true_range(high, low, close)
+    return _calculate_rma(true_range, period)
+
+
+def calculate_true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    """Calculate true range from high, low, and previous close."""
+
+    previous_close = close.shift(1)
+    ranges = pd.concat(
+        (
+            high - low,
+            (high - previous_close).abs(),
+            (low - previous_close).abs(),
+        ),
+        axis=1,
+    )
+    return ranges.max(axis=1)
 
 
 def calculate_breakout_levels(

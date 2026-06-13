@@ -83,6 +83,10 @@ class RiskSettings:
 class StrategySettings:
     bias_threshold: float
     use_heikin_ashi: bool
+    atr_length: int
+    sl_atr_mult: float
+    tp_atr_mult: float
+    product_leverage: float
 
 
 @dataclass(frozen=True)
@@ -413,13 +417,33 @@ def _load_strategy(raw: dict[str, Any]) -> StrategySettings:
     section = _required_section(raw, "strategy")
     bias_threshold = _required_float(section, "bias_threshold", "strategy.bias_threshold")
     use_heikin_ashi = _optional_bool(section, "use_heikin_ashi", "strategy.use_heikin_ashi", False)
+    atr_length = _required_int(section, "atr_length", "strategy.atr_length")
+    sl_atr_mult = _required_float(section, "sl_atr_mult", "strategy.sl_atr_mult")
+    tp_atr_mult = _required_float(section, "tp_atr_mult", "strategy.tp_atr_mult")
+    product_leverage = _required_float(section, "product_leverage", "strategy.product_leverage")
 
     if bias_threshold <= 0 or bias_threshold >= 1:
         raise SettingsValidationError("strategy.bias_threshold must be greater than 0 and lower than 1.")
 
+    if atr_length <= 0:
+        raise SettingsValidationError("strategy.atr_length must be greater than zero.")
+
+    if sl_atr_mult <= 0:
+        raise SettingsValidationError("strategy.sl_atr_mult must be greater than zero.")
+
+    if tp_atr_mult <= 0:
+        raise SettingsValidationError("strategy.tp_atr_mult must be greater than zero.")
+
+    if product_leverage <= 0:
+        raise SettingsValidationError("strategy.product_leverage must be greater than zero.")
+
     return StrategySettings(
         bias_threshold=bias_threshold,
         use_heikin_ashi=use_heikin_ashi,
+        atr_length=atr_length,
+        sl_atr_mult=sl_atr_mult,
+        tp_atr_mult=tp_atr_mult,
+        product_leverage=product_leverage,
     )
 
 

@@ -19,6 +19,8 @@ PAPER_MODE = "paper"
 ACTIVE_STATUSES = {"PendingSubmit", "PreSubmitted", "Submitted", "PartiallyFilled"}
 TERMINAL_STATUSES = {"Filled", "Cancelled", "Inactive", "Rejected"}
 KNOWN_STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
+ENTRY_FILL_TIMEOUT_SECONDS = 60.0
+PROTECTIVE_SUBMIT_TIMEOUT_SECONDS = 10.0
 
 JournalStatusEvent = Literal[
     "order_submitted",
@@ -57,6 +59,7 @@ class ManagedOrderResult:
     trade: Any
     status: ManagedOrderStatus
     state: BotState | None
+    protective_trades: tuple[Any, ...] = ()
 
 
 class OrderManager:
@@ -119,19 +122,18 @@ class OrderManager:
         state: BotState | None = None,
         ib: Any | None = None,
     ) -> ManagedOrderResult:
-        """Submit a prebuilt entry order set.
-
-        The first paper version submits one entry order only. Attached
-        protective order submission is intentionally left for a later confirmed
-        design because parent/transmit behavior is instrument-sensitive.
-        """
+        """Submit an entry order and, after fill, broker-side OCA protection."""
 
         self._require_paper_mode()
         if order_set.has_protective_orders:
-            raise OrderManagerError("Protective order submission is not enabled in the first paper manager version.")
+            raise OrderManagerError(
+                "Prebuilt protective orders are not accepted; OrderManager builds post-fill OCA protection."
+            )
 
         active_ib = ib if ib is not None else self._connected_ib()
         current_state = self._load_state(state)
+        if current_state is None:
+            raise OrderManagerError("Bot state is required to track broker-side protective orders.")
         self._guard_duplicate_submission(trade_plan, current_state)
         self._guard_connected_account(active_ib)
         self._guard_order_accounts(order_set)
@@ -161,14 +163,194 @@ class OrderManager:
             force=True,
         )
 
-        self._logger.info(
-            "Paper order submitted. signal_id=%s order_id=%s perm_id=%s status=%s",
-            status.signal_id,
-            status.order_id,
-            status.perm_id,
-            status.status,
+        filled_status = await self._wait_for_entry_fill(
+            active_ib,
+            trade,
+            trade_plan=trade_plan,
+            state=updated_state,
+            timeout_seconds=ENTRY_FILL_TIMEOUT_SECONDS,
         )
-        return ManagedOrderResult(trade=trade, status=status, state=updated_state)
+        updated_state = self._process_status_update(
+            filled_status,
+            trade_plan,
+            updated_state,
+            source="fill_wait",
+            force=True,
+        )
+
+        protective_trades, updated_state = await self._submit_protective_oca_orders(
+            active_ib,
+            contract=contract,
+            trade_plan=trade_plan,
+            entry_status=filled_status,
+            state=updated_state,
+        )
+
+        self._logger.info(
+            "Paper order protected. signal_id=%s entry_order_id=%s entry_perm_id=%s protective_orders=%s",
+            filled_status.signal_id,
+            filled_status.order_id,
+            filled_status.perm_id,
+            len(protective_trades),
+        )
+        return ManagedOrderResult(
+            trade=trade,
+            status=filled_status,
+            state=updated_state,
+            protective_trades=tuple(protective_trades),
+        )
+
+    async def _wait_for_entry_fill(
+        self,
+        ib: Any,
+        trade: Any,
+        *,
+        trade_plan: Any,
+        state: BotState | None,
+        timeout_seconds: float,
+    ) -> ManagedOrderStatus:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        last_status = _managed_status(trade, trade_plan)
+
+        while asyncio.get_running_loop().time() <= deadline:
+            last_status = _managed_status(trade, trade_plan)
+            if last_status.status == "Filled":
+                if last_status.avg_fill_price <= 0 or last_status.filled <= 0:
+                    raise OrderManagerError("Entry order filled without a usable average fill price.")
+                return last_status
+
+            if last_status.status in {"Cancelled", "Inactive", "Rejected"}:
+                raise OrderManagerError(f"Entry order reached terminal status before fill: {last_status.status}.")
+
+            await asyncio.sleep(0.25)
+
+        if last_status.filled > 0 and last_status.avg_fill_price > 0:
+            raise OrderManagerError(
+                "Entry order partially filled before timeout; manual reconciliation is required before continuing."
+            )
+
+        self._cancel_unfilled_entry(ib, trade)
+        self._process_status_update(last_status, trade_plan, state, source="fill_timeout", force=True)
+        raise OrderManagerError("Entry order did not fill before protective order timeout; unfilled entry was cancelled.")
+
+    async def _submit_protective_oca_orders(
+        self,
+        ib: Any,
+        *,
+        contract: Any,
+        trade_plan: Any,
+        entry_status: ManagedOrderStatus,
+        state: BotState | None,
+    ) -> tuple[tuple[Any, ...], BotState | None]:
+        stop_price, take_profit_price = _protective_product_prices(entry_status, trade_plan)
+        oca_group = _oca_group_name(entry_status, trade_plan)
+        stop_loss_order, take_profit_order = self._builder.build_exit_oca_orders(
+            trade_plan,
+            quantity=entry_status.filled,
+            stop_loss_price=stop_price,
+            take_profit_price=take_profit_price,
+            oca_group=oca_group,
+        )
+        protective_order_set = BuiltOrderSet(
+            entry_order=stop_loss_order,
+            take_profit_order=take_profit_order,
+        )
+        self._guard_order_accounts(protective_order_set)
+
+        self._logger.info(
+            "Submitting protective OCA orders. signal_id=%s quantity=%s stop=%s take_profit=%s oca_group=%s",
+            getattr(trade_plan, "signal_id", None),
+            entry_status.filled,
+            stop_price,
+            take_profit_price,
+            oca_group,
+        )
+
+        try:
+            stop_trade = ib.placeOrder(contract, stop_loss_order)
+            take_profit_trade = ib.placeOrder(contract, take_profit_order)
+        except Exception as exc:
+            self._logger.exception("Protective OCA order submission failed.")
+            raise OrderManagerError("Failed to submit broker-side protective OCA orders.") from exc
+
+        protective_trades = (stop_trade, take_profit_trade)
+        await self._wait_for_protective_submission(protective_trades, trade_plan)
+        updated_state = self._persist_protective_orders(
+            state,
+            trade_plan=trade_plan,
+            protective_trades=protective_trades,
+            stop_price=stop_price,
+            take_profit_price=take_profit_price,
+            oca_group=oca_group,
+        )
+        return protective_trades, updated_state
+
+    async def _wait_for_protective_submission(
+        self,
+        protective_trades: tuple[Any, ...],
+        trade_plan: Any,
+    ) -> None:
+        deadline = asyncio.get_running_loop().time() + PROTECTIVE_SUBMIT_TIMEOUT_SECONDS
+
+        while asyncio.get_running_loop().time() <= deadline:
+            statuses = [_managed_status(trade, trade_plan) for trade in protective_trades]
+            if all(status.order_id is not None and status.status in ACTIVE_STATUSES for status in statuses):
+                return
+
+            failed = [status for status in statuses if status.status in {"Cancelled", "Inactive", "Rejected"}]
+            if failed:
+                details = ", ".join(f"order_id={status.order_id} status={status.status}" for status in failed)
+                raise OrderManagerError(f"Protective OCA order rejected or inactive: {details}.")
+
+            await asyncio.sleep(0.25)
+
+        details = ", ".join(
+            f"order_id={status.order_id} status={status.status}"
+            for status in (_managed_status(trade, trade_plan) for trade in protective_trades)
+        )
+        raise OrderManagerError(f"Protective OCA orders were not confirmed by IB before timeout: {details}.")
+
+    def _persist_protective_orders(
+        self,
+        state: BotState | None,
+        *,
+        trade_plan: Any,
+        protective_trades: tuple[Any, ...],
+        stop_price: float,
+        take_profit_price: float,
+        oca_group: str,
+    ) -> BotState | None:
+        if state is None:
+            return None
+
+        protective_statuses = [_managed_status(trade, trade_plan) for trade in protective_trades]
+        for status in protective_statuses:
+            if status.order_id is not None and status.order_id not in state.known_order_ids:
+                state.known_order_ids.append(status.order_id)
+            if status.perm_id is not None and status.perm_id not in state.known_perm_ids:
+                state.known_perm_ids.append(status.perm_id)
+
+        state.active_trade["protective_oca_group"] = oca_group
+        state.active_trade["protective_orders_confirmed"] = True
+        state.active_trade["product_stop_price"] = stop_price
+        state.active_trade["product_take_profit_price"] = take_profit_price
+        state.active_trade["protective_orders"] = [_protective_order_payload(status) for status in protective_statuses]
+
+        if self._state_store is not None:
+            self._state_store.save(state)
+
+        return state
+
+    def _cancel_unfilled_entry(self, ib: Any, trade: Any) -> None:
+        cancel_order = getattr(ib, "cancelOrder", None)
+        if not callable(cancel_order):
+            self._logger.warning("Entry did not fill and IB client has no cancelOrder method.")
+            return
+
+        try:
+            cancel_order(getattr(trade, "order", None))
+        except Exception:
+            self._logger.exception("Failed to cancel unfilled entry order after fill timeout.")
 
     def refresh_order_status(
         self,
@@ -485,10 +667,58 @@ def _active_trade_payload(trade_plan: Any | None, status: ManagedOrderStatus) ->
                 "signal_side": getattr(trade_plan, "signal_side", None),
                 "execution_side": getattr(trade_plan, "execution_side", None),
                 "capital_allocated": getattr(trade_plan, "capital_allocated", None),
+                "underlying_symbol": getattr(trade_plan, "underlying_symbol", None),
+                "underlying_entry_price": getattr(trade_plan, "underlying_entry_price", None),
+                "atr": getattr(trade_plan, "atr", None),
+                "atr_pct": getattr(trade_plan, "atr_pct", None),
+                "underlying_sl_price": getattr(trade_plan, "underlying_sl_price", None),
+                "underlying_tp_price": getattr(trade_plan, "underlying_tp_price", None),
+                "underlying_sl_pct": getattr(trade_plan, "underlying_sl_pct", None),
+                "underlying_tp_pct": getattr(trade_plan, "underlying_tp_pct", None),
+                "product_leverage": getattr(trade_plan, "product_leverage", None),
+                "product_sl_pct": getattr(trade_plan, "product_sl_pct", None),
+                "product_tp_pct": getattr(trade_plan, "product_tp_pct", None),
             }
         )
 
     return payload
+
+
+def _protective_product_prices(status: ManagedOrderStatus, trade_plan: Any) -> tuple[float, float]:
+    avg_fill_price = status.avg_fill_price
+    if avg_fill_price <= 0:
+        raise OrderManagerError("Cannot compute protective prices without a positive average fill price.")
+
+    product_sl_pct = _positive_float_attr(trade_plan, "product_sl_pct")
+    product_tp_pct = _positive_float_attr(trade_plan, "product_tp_pct")
+    stop_price = avg_fill_price * (1 - product_sl_pct / 100)
+    take_profit_price = avg_fill_price * (1 + product_tp_pct / 100)
+
+    if stop_price <= 0:
+        raise OrderManagerError("Computed product stop price is not positive; refusing unprotected entry.")
+
+    return stop_price, take_profit_price
+
+
+def _oca_group_name(status: ManagedOrderStatus, trade_plan: Any) -> str:
+    order_id = status.order_id
+    if order_id is not None:
+        return f"ABM_ENTRY_{order_id}_OCA"
+
+    signal_id = _optional_text_attr(trade_plan, "signal_id") or "UNKNOWN"
+    sanitized = "".join(character if character.isalnum() else "_" for character in signal_id)
+    return f"ABM_{sanitized}_OCA"
+
+
+def _protective_order_payload(status: ManagedOrderStatus) -> dict[str, Any]:
+    return {
+        "order_id": status.order_id,
+        "perm_id": status.perm_id,
+        "status": status.status,
+        "action": status.action,
+        "order_type": status.order_type,
+        "total_quantity": status.total_quantity,
+    }
 
 
 def _resolve_ib_client(ib_client: Any) -> Any:
@@ -514,6 +744,16 @@ def _safe_notify(notifier: Any, method_name: str, **kwargs: Any) -> None:
     method = getattr(notifier, method_name, None)
     if callable(method):
         method(**kwargs)
+
+
+def _positive_float_attr(source: Any, name: str) -> float:
+    value = getattr(source, name, None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise OrderManagerError(f"{name} must be a positive number.")
+    result = float(value)
+    if result <= 0:
+        raise OrderManagerError(f"{name} must be greater than zero.")
+    return result
 
 
 def _optional_text_attr(source: Any, name: str) -> str | None:

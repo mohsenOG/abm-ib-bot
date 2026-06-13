@@ -168,12 +168,18 @@ class BotRunner:
         indicators = add_indicators(
             candle_store.get_candles(),
             use_heikin_ashi=self.settings.strategy.use_heikin_ashi,
+            atr_period=self.settings.strategy.atr_length,
         )
         biased_data = calculate_bias(indicators)
         return generate_signal(
             biased_data,
             self.settings.strategy.bias_threshold,
             last_signal_id=state.last_signal_id,
+            underlying_symbol=self.settings.signal_instrument.symbol,
+            atr_length=self.settings.strategy.atr_length,
+            sl_atr_mult=self.settings.strategy.sl_atr_mult,
+            tp_atr_mult=self.settings.strategy.tp_atr_mult,
+            product_leverage=self.settings.strategy.product_leverage,
         )
 
     def _record_signal(self, signal: Signal) -> None:

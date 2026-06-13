@@ -80,10 +80,11 @@ class OrderBuilder:
             order_ref=signal_id,
         )
 
-        if protective_orders and parent_order_id is None:
+        has_protective_orders = any(order is not None for order in protective_orders)
+        if has_protective_orders and parent_order_id is None:
             raise OrderBuilderError("parent_order_id is required when building protective orders.")
 
-        if protective_orders:
+        if has_protective_orders:
             entry_order.transmit = False
 
         return BuiltOrderSet(
@@ -101,6 +102,42 @@ class OrderBuilder:
         """Build a single limit entry order."""
 
         return self.build_order_set(trade_plan, order_type="limit", limit_price=limit_price).entry_order
+
+    def build_exit_oca_orders(
+        self,
+        trade_plan: Any,
+        *,
+        quantity: float,
+        stop_loss_price: float,
+        take_profit_price: float,
+        oca_group: str,
+    ) -> tuple[Order, Order]:
+        """Build broker-side OCA exit orders for a filled entry position."""
+
+        action = _opposite_action(_order_action(trade_plan))
+        exit_quantity = _positive_float(quantity, "quantity")
+        signal_id = _optional_text(getattr(trade_plan, "signal_id", None), "signal_id")
+        group = _optional_text(oca_group, "oca_group")
+
+        stop_loss_order = StopOrder(
+            action,
+            exit_quantity,
+            _positive_float(stop_loss_price, "stop_loss_price"),
+        )
+        take_profit_order = LimitOrder(
+            action,
+            exit_quantity,
+            _positive_float(take_profit_price, "take_profit_price"),
+        )
+
+        for order in (stop_loss_order, take_profit_order):
+            _apply_common_fields(order, account_id=self._account_id, order_ref=signal_id)
+            order.ocaGroup = group
+            order.ocaType = 1
+
+        stop_loss_order.transmit = False
+        take_profit_order.transmit = True
+        return stop_loss_order, take_profit_order
 
     def _build_entry_order(
         self,
