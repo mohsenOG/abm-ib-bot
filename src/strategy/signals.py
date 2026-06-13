@@ -33,9 +33,6 @@ class Signal:
     underlying_tp_price: float
     underlying_sl_pct: float
     underlying_tp_pct: float
-    product_leverage: float
-    product_sl_pct: float
-    product_tp_pct: float
 
 
 def crossover(x: pd.Series, y: pd.Series) -> pd.Series:
@@ -59,7 +56,6 @@ def generate_signal(
     atr_length: int = 14,
     sl_atr_mult: float = 1.0,
     tp_atr_mult: float = 2.0,
-    product_leverage: float = 1.0,
 ) -> Signal | None:
     """Return the latest BUY/SELL signal from bias crossover, or None."""
 
@@ -72,7 +68,6 @@ def generate_signal(
     symbol = _validate_symbol(underlying_symbol)
     stop_multiplier = _validate_positive_number(sl_atr_mult, "sl_atr_mult")
     take_profit_multiplier = _validate_positive_number(tp_atr_mult, "tp_atr_mult")
-    leverage = _validate_positive_number(product_leverage, "product_leverage")
     buy_line = pd.Series(threshold, index=clean.index, dtype="float64")
     sell_line = pd.Series(-threshold, index=clean.index, dtype="float64")
 
@@ -95,7 +90,6 @@ def generate_signal(
         underlying_symbol=symbol,
         sl_atr_mult=stop_multiplier,
         tp_atr_mult=take_profit_multiplier,
-        product_leverage=leverage,
     )
     if signal.signal_id == last_signal_id:
         return None
@@ -145,7 +139,6 @@ def _build_signal(
     underlying_symbol: str,
     sl_atr_mult: float,
     tp_atr_mult: float,
-    product_leverage: float,
 ) -> Signal:
     timestamp = row["timestamp"]
     price = row["close"]
@@ -176,9 +169,6 @@ def _build_signal(
 
     underlying_sl_pct = sl_distance / entry_price * 100
     underlying_tp_pct = tp_distance / entry_price * 100
-    product_sl_pct = underlying_sl_pct * product_leverage
-    product_tp_pct = underlying_tp_pct * product_leverage
-
     return Signal(
         signal_id=signal_id,
         timestamp=timestamp_text,
@@ -194,9 +184,6 @@ def _build_signal(
         underlying_tp_price=underlying_tp_price,
         underlying_sl_pct=underlying_sl_pct,
         underlying_tp_pct=underlying_tp_pct,
-        product_leverage=product_leverage,
-        product_sl_pct=product_sl_pct,
-        product_tp_pct=product_tp_pct,
     )
 
 

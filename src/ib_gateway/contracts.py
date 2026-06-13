@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from ib_async import Commodity, Contract
 
 from logging_setup.logger import get_logger
-
-
-ExecutionSide = Literal["long", "short"]
 
 
 class ContractBuildError(ValueError):
@@ -32,19 +29,17 @@ class SignalContractConfig:
 
 @dataclass(frozen=True)
 class ExecutionContractConfig:
-    side: ExecutionSide
     asset_class: str
-    con_id: int | None
-    local_symbol: str | None
-    exchange: str | None
+    con_id: int
     currency: str
+    exchange: str
 
 
 def build_contract(settings: Any) -> Contract:
     """Build the configured signal contract.
 
     This keeps the historical Task 8 entry point focused on the signal instrument.
-    Use ``build_execution_contract`` for side-specific turbo products.
+    Use ``build_execution_product_contract`` for curated turbo products.
     """
 
     return build_signal_contract(settings)
@@ -66,10 +61,10 @@ def build_signal_contract(settings: Any) -> Contract:
     raise ContractBuildError(f"Unsupported signal asset_class: {config.asset_class}.")
 
 
-def build_execution_contract(settings: Any, side: ExecutionSide) -> Contract:
-    """Build a configured long or short execution contract without qualifying it."""
+def build_execution_product_contract(product: Any) -> Contract:
+    """Build a curated execution product contract without qualifying it."""
 
-    config = _load_execution_contract_config(settings, side)
+    config = _load_execution_contract_config(product)
     _validate_execution_contract_config(config)
 
     contract = Contract(
@@ -77,12 +72,7 @@ def build_execution_contract(settings: Any, side: ExecutionSide) -> Contract:
         exchange=config.exchange,
         currency=config.currency,
     )
-
-    if config.con_id is not None:
-        contract.conId = config.con_id
-
-    if config.local_symbol is not None:
-        contract.localSymbol = config.local_symbol
+    contract.conId = config.con_id
 
     return contract
 
@@ -144,27 +134,12 @@ def _load_signal_contract_config(settings: Any) -> SignalContractConfig:
     )
 
 
-def _load_execution_contract_config(settings: Any, side: ExecutionSide) -> ExecutionContractConfig:
-    if side not in ("long", "short"):
-        raise ContractBuildError("Execution side must be 'long' or 'short'.")
-
-    execution_instruments = getattr(settings, "execution_instruments", None)
-    if execution_instruments is None:
-        raise ContractBuildError("execution_instruments settings are required for turbo execution contracts.")
-
-    instrument = getattr(execution_instruments, side, None)
-    if instrument is None:
-        raise ContractBuildError(f"execution_instruments.{side} settings are required.")
-
-    exchange = _optional_string(instrument, "exchange")
-
+def _load_execution_contract_config(product: Any) -> ExecutionContractConfig:
     return ExecutionContractConfig(
-        side=side,
-        asset_class=_required_string(instrument, "asset_class").upper(),
-        con_id=_optional_int(instrument, "con_id"),
-        local_symbol=_optional_string(instrument, "local_symbol"),
-        exchange=exchange.upper() if exchange is not None else None,
-        currency=_required_string(instrument, "currency").upper(),
+        asset_class=_required_string(product, "sec_type").upper(),
+        con_id=_required_int(product, "con_id"),
+        currency=_required_string(product, "currency").upper(),
+        exchange=_required_string(product, "exchange").upper(),
     )
 
 
@@ -187,18 +162,16 @@ def _validate_signal_contract_config(config: SignalContractConfig) -> None:
 
 def _validate_execution_contract_config(config: ExecutionContractConfig) -> None:
     if config.asset_class != "IOPT":
-        raise ContractBuildError(f"execution_instruments.{config.side}.asset_class must be IOPT.")
+        raise ContractBuildError("Execution product asset_class must be IOPT.")
 
-    if config.con_id is None and config.local_symbol is None:
-        raise ContractBuildError(
-            f"execution_instruments.{config.side} requires con_id or local_symbol before execution use."
-        )
+    if config.con_id <= 0:
+        raise ContractBuildError("Execution product con_id must be greater than zero.")
 
-    if config.exchange is None:
-        raise ContractBuildError(f"execution_instruments.{config.side}.exchange is required before execution use.")
+    if not config.exchange:
+        raise ContractBuildError("Execution product exchange is required before execution use.")
 
     if config.currency != "EUR":
-        raise ContractBuildError(f"execution_instruments.{config.side}.currency must be EUR.")
+        raise ContractBuildError("Execution product currency must be EUR.")
 
 
 def _require_connected(ib: Any) -> None:
@@ -234,12 +207,10 @@ def _optional_string(source: Any, name: str) -> str | None:
     return value.strip()
 
 
-def _optional_int(source: Any, name: str) -> int | None:
+def _required_int(source: Any, name: str) -> int:
     value = getattr(source, name, None)
-    if value is None:
-        return None
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ContractBuildError(f"{name} must be an integer when provided.")
+        raise ContractBuildError(f"{name} must be an integer.")
     if value <= 0:
-        raise ContractBuildError(f"{name} must be greater than zero when provided.")
+        raise ContractBuildError(f"{name} must be greater than zero.")
     return value

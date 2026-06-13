@@ -1,0 +1,29 @@
+{
+  "execution_products": {
+    "quote_max_age_seconds": 10,
+    "max_spread_pct": 2.0,
+    "max_order_value": 100.0,
+    "long": [
+      {
+        "secType": "IOPT",
+        "conId": 100000001,
+        "exchange": "SMART",
+        "currency": "EUR",
+        "leverage": 10.0,
+        "enabled": false,
+        "issuer_fee_pct": 0.0
+      }
+    ],
+    "short": [
+      {
+        "secType": "IOPT",
+        "conId": 100000002,
+        "exchange": "SMART",
+        "currency": "EUR",
+        "leverage": 10.0,
+        "enabled": false,
+        "issuer_fee_pct": 0.0
+      }
+    ]
+  }
+}

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from config.settings import AppSettings, ExecutionInstrumentSettings, RiskSettings
+from config.settings import AppSettings, RiskSettings
 from risk.sizing import QuantityRules, RiskSizingError, calculate_quantity
 
 
@@ -29,10 +29,18 @@ class RiskManagerError(ValueError):
 @dataclass(frozen=True)
 class ExecutionProduct:
     asset_class: str
-    con_id: int | None
+    con_id: int
     local_symbol: str | None
-    exchange: str | None
+    exchange: str
     currency: str
+    leverage: float
+    issuer_fee_pct: float
+    bid: float | None = None
+    ask: float | None = None
+    quote_time: str | None = None
+    spread_pct: float | None = None
+    commission_pct: float | None = None
+    estimated_total_cost_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -90,13 +98,16 @@ class RiskManager:
         account_snapshot: Any,
         *,
         last_signal_id: str | None = None,
-        selected_product: ExecutionProduct | ExecutionInstrumentSettings | None = None,
+        selected_product: ExecutionProduct | None = None,
         product_price: float | None = None,
     ) -> RiskDecision:
         """Return an approved trade plan or a blocked reason."""
 
         normalized_signal = _normalize_signal(signal)
-        product = _normalize_product(selected_product or self._product_for_signal(normalized_signal.side))
+        if selected_product is None:
+            return _blocked("No selected execution product was provided.")
+        product = _normalize_product(selected_product)
+        effective_product_price = product_price if product_price is not None else product.ask
 
         if self._settings.trading.mode == "alert_only":
             return _blocked("Trading mode is alert_only.")
@@ -120,13 +131,16 @@ class RiskManager:
         if active_slots >= self._risk.max_concurrent_position_slots:
             return _blocked("No position slots are available.")
 
-        if normalized_signal.product_sl_pct >= 100:
+        product_sl_pct = normalized_signal.underlying_sl_pct * product.leverage
+        product_tp_pct = normalized_signal.underlying_tp_pct * product.leverage
+
+        if product_sl_pct >= 100:
             return _blocked("Product stop-loss percentage is 100% or greater; protective stop price would be invalid.")
 
         try:
             quantity = calculate_quantity(
                 self._risk.capital_per_position,
-                product_price=product_price,
+                product_price=effective_product_price,
                 quantity_rules=self._quantity_rules,
             )
         except RiskSizingError as exc:
@@ -152,10 +166,10 @@ class RiskManager:
                 underlying_tp_price=normalized_signal.underlying_tp_price,
                 underlying_sl_pct=normalized_signal.underlying_sl_pct,
                 underlying_tp_pct=normalized_signal.underlying_tp_pct,
-                product_leverage=normalized_signal.product_leverage,
-                product_sl_pct=normalized_signal.product_sl_pct,
-                product_tp_pct=normalized_signal.product_tp_pct,
-                product_price=product_price,
+                product_leverage=product.leverage,
+                product_sl_pct=product_sl_pct,
+                product_tp_pct=product_tp_pct,
+                product_price=effective_product_price,
                 product=product,
             ),
         )
@@ -163,12 +177,6 @@ class RiskManager:
     @property
     def risk_settings(self) -> RiskSettings:
         return self._risk
-
-    def _product_for_signal(self, side: SignalSide) -> ExecutionInstrumentSettings:
-        if side == "BUY":
-            return self._settings.execution_instruments.long
-        return self._settings.execution_instruments.short
-
 
 @dataclass(frozen=True)
 class _NormalizedSignal:
@@ -184,9 +192,6 @@ class _NormalizedSignal:
     underlying_tp_price: float
     underlying_sl_pct: float
     underlying_tp_pct: float
-    product_leverage: float
-    product_sl_pct: float
-    product_tp_pct: float
 
 
 def _normalize_signal(signal: Any) -> _NormalizedSignal:
@@ -194,7 +199,6 @@ def _normalize_signal(signal: Any) -> _NormalizedSignal:
     timestamp = _required_text_attr(signal, "timestamp")
     raw_side = _required_text_attr(signal, "side").upper()
     price = _positive_float_attr(signal, "price")
-    product_sl_pct = _positive_float_attr(signal, "product_sl_pct")
 
     if raw_side not in {"BUY", "SELL"}:
         raise RiskManagerError("signal.side must be BUY or SELL.")
@@ -212,19 +216,24 @@ def _normalize_signal(signal: Any) -> _NormalizedSignal:
         underlying_tp_price=_positive_float_attr(signal, "underlying_tp_price"),
         underlying_sl_pct=_positive_float_attr(signal, "underlying_sl_pct"),
         underlying_tp_pct=_positive_float_attr(signal, "underlying_tp_pct"),
-        product_leverage=_positive_float_attr(signal, "product_leverage"),
-        product_sl_pct=product_sl_pct,
-        product_tp_pct=_positive_float_attr(signal, "product_tp_pct"),
     )
 
 
-def _normalize_product(product: ExecutionProduct | ExecutionInstrumentSettings) -> ExecutionProduct:
+def _normalize_product(product: ExecutionProduct) -> ExecutionProduct:
     return ExecutionProduct(
         asset_class=_required_text_attr(product, "asset_class").upper(),
-        con_id=_optional_int_attr(product, "con_id"),
+        con_id=_required_int_attr(product, "con_id"),
         local_symbol=_optional_text_attr(product, "local_symbol"),
-        exchange=_optional_text_attr(product, "exchange"),
+        exchange=_required_text_attr(product, "exchange").upper(),
         currency=_required_text_attr(product, "currency").upper(),
+        leverage=_positive_float_attr(product, "leverage"),
+        issuer_fee_pct=_non_negative_float_attr(product, "issuer_fee_pct"),
+        bid=_optional_positive_float_attr(product, "bid"),
+        ask=_optional_positive_float_attr(product, "ask"),
+        quote_time=_optional_text_attr(product, "quote_time"),
+        spread_pct=_optional_non_negative_float_attr(product, "spread_pct"),
+        commission_pct=_optional_non_negative_float_attr(product, "commission_pct"),
+        estimated_total_cost_pct=_optional_non_negative_float_attr(product, "estimated_total_cost_pct"),
     )
 
 
@@ -299,6 +308,13 @@ def _optional_int_attr(source: Any, name: str) -> int | None:
     return value
 
 
+def _required_int_attr(source: Any, name: str) -> int:
+    value = _optional_int_attr(source, name)
+    if value is None:
+        raise RiskManagerError(f"{name} is required.")
+    return value
+
+
 def _positive_float_attr(source: Any, name: str) -> float:
     value = getattr(source, name, None)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -307,3 +323,27 @@ def _positive_float_attr(source: Any, name: str) -> float:
     if result <= 0:
         raise RiskManagerError(f"{name} must be greater than zero.")
     return result
+
+
+def _optional_positive_float_attr(source: Any, name: str) -> float | None:
+    value = getattr(source, name, None)
+    if value is None:
+        return None
+    return _positive_float_attr(source, name)
+
+
+def _non_negative_float_attr(source: Any, name: str) -> float:
+    value = getattr(source, name, None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RiskManagerError(f"{name} must be a number.")
+    result = float(value)
+    if result < 0:
+        raise RiskManagerError(f"{name} must be zero or greater.")
+    return result
+
+
+def _optional_non_negative_float_attr(source: Any, name: str) -> float | None:
+    value = getattr(source, name, None)
+    if value is None:
+        return None
+    return _non_negative_float_attr(source, name)

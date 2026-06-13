@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,18 +58,24 @@ class InstrumentSettings:
 
 
 @dataclass(frozen=True)
-class ExecutionInstrumentSettings:
-    asset_class: str
-    con_id: int | None
-    local_symbol: str | None
-    exchange: str | None
+class ExecutionProductSettings:
+    side: str
+    sec_type: str
+    con_id: int
+    exchange: str
     currency: str
+    leverage: float
+    enabled: bool
+    issuer_fee_pct: float
 
 
 @dataclass(frozen=True)
-class ExecutionInstrumentsSettings:
-    long: ExecutionInstrumentSettings
-    short: ExecutionInstrumentSettings
+class ExecutionProductsSettings:
+    quote_max_age_seconds: float
+    max_spread_pct: float
+    max_order_value: float
+    long: tuple[ExecutionProductSettings, ...]
+    short: tuple[ExecutionProductSettings, ...]
 
 
 @dataclass(frozen=True)
@@ -86,7 +93,6 @@ class StrategySettings:
     atr_length: int
     sl_atr_mult: float
     tp_atr_mult: float
-    product_leverage: float
 
 
 @dataclass(frozen=True)
@@ -122,7 +128,7 @@ class AppSettings:
     telegram: TelegramSettings
     signal_instrument: InstrumentSettings
     instrument: InstrumentSettings
-    execution_instruments: ExecutionInstrumentsSettings
+    execution_products: ExecutionProductsSettings
     risk: RiskSettings
     strategy: StrategySettings
     runtime: RuntimeSettings
@@ -156,7 +162,7 @@ def load_settings(
         telegram=_load_telegram(raw),
         signal_instrument=signal_instrument,
         instrument=signal_instrument,
-        execution_instruments=_load_execution_instruments(raw),
+        execution_products=_load_execution_products(project_root),
         risk=_load_risk(raw),
         strategy=_load_strategy(raw),
         runtime=_load_runtime(raw),
@@ -186,6 +192,19 @@ def _load_yaml(settings_path: Path) -> dict[str, Any]:
 
     if not isinstance(loaded, dict):
         raise SettingsValidationError("settings.yml must contain a YAML mapping at the root.")
+
+    return loaded
+
+
+def _load_json(json_path: Path) -> dict[str, Any]:
+    if not json_path.exists():
+        raise SettingsValidationError(f"Execution products file not found: {json_path}")
+
+    with json_path.open("r", encoding="utf-8") as file_obj:
+        loaded = json.load(file_obj)
+
+    if not isinstance(loaded, dict):
+        raise SettingsValidationError("execution_products.json must contain a JSON object at the root.")
 
     return loaded
 
@@ -311,73 +330,81 @@ def _load_signal_instrument(raw: dict[str, Any]) -> InstrumentSettings:
     )
 
 
-def _load_execution_instruments(raw: dict[str, Any]) -> ExecutionInstrumentsSettings:
-    section = _optional_section(raw, "execution_instruments")
-    if not section:
-        return ExecutionInstrumentsSettings(
-            long=_empty_execution_instrument("long"),
-            short=_empty_execution_instrument("short"),
-        )
+def _load_execution_products(project_root: Path) -> ExecutionProductsSettings:
+    raw = _load_json(project_root / "execution_products.json")
+    section = _required_section(raw, "execution_products")
+    quote_max_age_seconds = _required_float(
+        section,
+        "quote_max_age_seconds",
+        "execution_products.quote_max_age_seconds",
+    )
+    max_spread_pct = _required_float(section, "max_spread_pct", "execution_products.max_spread_pct")
+    max_order_value = _required_float(section, "max_order_value", "execution_products.max_order_value")
 
-    return ExecutionInstrumentsSettings(
-        long=_load_execution_instrument(section, "long"),
-        short=_load_execution_instrument(section, "short"),
+    if quote_max_age_seconds <= 0:
+        raise SettingsValidationError("execution_products.quote_max_age_seconds must be greater than zero.")
+    if max_spread_pct <= 0:
+        raise SettingsValidationError("execution_products.max_spread_pct must be greater than zero.")
+    if max_order_value <= 0:
+        raise SettingsValidationError("execution_products.max_order_value must be greater than zero.")
+
+    return ExecutionProductsSettings(
+        quote_max_age_seconds=quote_max_age_seconds,
+        max_spread_pct=max_spread_pct,
+        max_order_value=max_order_value,
+        long=_load_execution_product_side(section, "long"),
+        short=_load_execution_product_side(section, "short"),
     )
 
 
-def _load_execution_instrument(
+def _load_execution_product_side(
     section: dict[str, Any],
     side: str,
-) -> ExecutionInstrumentSettings:
-    instrument_section = _optional_section(section, side)
-    if not instrument_section:
-        return _empty_execution_instrument(side)
+) -> tuple[ExecutionProductSettings, ...]:
+    products = section.get(side)
+    if not isinstance(products, list):
+        raise SettingsValidationError(f"execution_products.{side} must be a list.")
 
-    asset_class = _required_string(
-        instrument_section,
-        "asset_class",
-        f"execution_instruments.{side}.asset_class",
-    ).upper()
-    con_id = _optional_int_or_none(
-        instrument_section,
-        "con_id",
-        f"execution_instruments.{side}.con_id",
-    )
-    local_symbol = _optional_string(
-        instrument_section,
-        "local_symbol",
-        f"execution_instruments.{side}.local_symbol",
-    )
-    exchange = _optional_string(
-        instrument_section,
-        "exchange",
-        f"execution_instruments.{side}.exchange",
-    )
-    currency = _required_string(
-        instrument_section,
-        "currency",
-        f"execution_instruments.{side}.currency",
-    ).upper()
+    return tuple(_load_execution_product(product, side, index) for index, product in enumerate(products))
 
-    if asset_class != "IOPT":
-        raise SettingsValidationError(f"execution_instruments.{side}.asset_class must be IOPT.")
 
-    return ExecutionInstrumentSettings(
-        asset_class=asset_class,
+def _load_execution_product(
+    product: Any,
+    side: str,
+    index: int,
+) -> ExecutionProductSettings:
+    if not isinstance(product, dict):
+        raise SettingsValidationError(f"execution_products.{side}[{index}] must be an object.")
+
+    prefix = f"execution_products.{side}[{index}]"
+    sec_type = _required_string(product, "secType", f"{prefix}.secType").upper()
+    con_id = _required_int(product, "conId", f"{prefix}.conId")
+    exchange = _required_string(product, "exchange", f"{prefix}.exchange").upper()
+    currency = _required_string(product, "currency", f"{prefix}.currency").upper()
+    leverage = _required_float(product, "leverage", f"{prefix}.leverage")
+    enabled = _required_bool(product, "enabled", f"{prefix}.enabled")
+    issuer_fee_pct = _required_float(product, "issuer_fee_pct", f"{prefix}.issuer_fee_pct")
+
+    if sec_type != "IOPT":
+        raise SettingsValidationError(f"{prefix}.secType must be IOPT.")
+    if con_id <= 0:
+        raise SettingsValidationError(f"{prefix}.conId must be greater than zero.")
+    if currency != "EUR":
+        raise SettingsValidationError(f"{prefix}.currency must be EUR.")
+    if leverage <= 0:
+        raise SettingsValidationError(f"{prefix}.leverage must be greater than zero.")
+    if issuer_fee_pct < 0:
+        raise SettingsValidationError(f"{prefix}.issuer_fee_pct must be zero or greater.")
+
+    return ExecutionProductSettings(
+        side=side,
+        sec_type=sec_type,
         con_id=con_id,
-        local_symbol=local_symbol,
-        exchange=exchange.upper() if exchange is not None else None,
+        exchange=exchange,
         currency=currency,
-    )
-
-
-def _empty_execution_instrument(side: str) -> ExecutionInstrumentSettings:
-    return ExecutionInstrumentSettings(
-        asset_class="IOPT",
-        con_id=None,
-        local_symbol=None,
-        exchange=None,
-        currency="EUR",
+        leverage=leverage,
+        enabled=enabled,
+        issuer_fee_pct=issuer_fee_pct,
     )
 
 
@@ -420,7 +447,6 @@ def _load_strategy(raw: dict[str, Any]) -> StrategySettings:
     atr_length = _required_int(section, "atr_length", "strategy.atr_length")
     sl_atr_mult = _required_float(section, "sl_atr_mult", "strategy.sl_atr_mult")
     tp_atr_mult = _required_float(section, "tp_atr_mult", "strategy.tp_atr_mult")
-    product_leverage = _required_float(section, "product_leverage", "strategy.product_leverage")
 
     if bias_threshold <= 0 or bias_threshold >= 1:
         raise SettingsValidationError("strategy.bias_threshold must be greater than 0 and lower than 1.")
@@ -434,16 +460,12 @@ def _load_strategy(raw: dict[str, Any]) -> StrategySettings:
     if tp_atr_mult <= 0:
         raise SettingsValidationError("strategy.tp_atr_mult must be greater than zero.")
 
-    if product_leverage <= 0:
-        raise SettingsValidationError("strategy.product_leverage must be greater than zero.")
-
     return StrategySettings(
         bias_threshold=bias_threshold,
         use_heikin_ashi=use_heikin_ashi,
         atr_length=atr_length,
         sl_atr_mult=sl_atr_mult,
         tp_atr_mult=tp_atr_mult,
-        product_leverage=product_leverage,
     )
 
 
@@ -580,6 +602,13 @@ def _optional_float(section: dict[str, Any], key: str, field_name: str, default:
 
 def _optional_bool(section: dict[str, Any], key: str, field_name: str, default: bool) -> bool:
     value = section.get(key, default)
+    if not isinstance(value, bool):
+        raise SettingsValidationError(f"{field_name} must be true or false.")
+    return value
+
+
+def _required_bool(section: dict[str, Any], key: str, field_name: str) -> bool:
+    value = section.get(key)
     if not isinstance(value, bool):
         raise SettingsValidationError(f"{field_name} must be true or false.")
     return value

@@ -23,20 +23,6 @@ signal_instrument:
   currency: USD
   expiry: null
 
-execution_instruments:
-  long:
-    asset_class: IOPT
-    con_id: null
-    local_symbol: null
-    exchange: null
-    currency: EUR
-  short:
-    asset_class: IOPT
-    con_id: null
-    local_symbol: null
-    exchange: null
-    currency: EUR
-
 risk:
   initial_capital: 1000
   capital_slots: 10
@@ -48,7 +34,6 @@ strategy:
   atr_length: 14
   sl_atr_mult: 1.0
   tp_atr_mult: 2.0
-  product_leverage: 10.0
 
 runtime:
   poll_seconds: 300

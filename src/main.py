@@ -12,9 +12,10 @@ from config.settings import AppSettings, load_settings
 from data.candle_store import CandleStore
 from data.market_data import MarketDataClient
 from execution.order_manager import OrderManager
+from execution.product_selector import ProductSelectionError, ProductSelector
 from ib_gateway.account import AccountReader
 from ib_gateway.connection import IBConnection
-from ib_gateway.contracts import build_execution_contract, build_signal_contract, qualify_contract
+from ib_gateway.contracts import build_execution_product_contract, build_signal_contract, qualify_contract
 from logging_setup.logger import get_logger, setup_logging
 from monitoring.account_guard import AccountGuard, AccountGuardError, configured_account_id
 from monitoring.emergency_stop import EmergencyStop
@@ -179,7 +180,6 @@ class BotRunner:
             atr_length=self.settings.strategy.atr_length,
             sl_atr_mult=self.settings.strategy.sl_atr_mult,
             tp_atr_mult=self.settings.strategy.tp_atr_mult,
-            product_leverage=self.settings.strategy.product_leverage,
         )
 
     def _record_signal(self, signal: Signal) -> None:
@@ -206,10 +206,23 @@ class BotRunner:
     async def _handle_paper_signal(self, *, ib: Any, signal: Signal, state: BotState) -> BotState:
         self.emergency_stop.assert_trading_allowed(state)
         account_snapshot = await AccountReader(ib).read_snapshot()
+        try:
+            selected_product, execution_contract = await ProductSelector(self.settings, ib).select_for_signal(signal.side)
+        except ProductSelectionError as exc:
+            reason = str(exc)
+            self.logger.info("Product selection blocked signal. signal_id=%s reason=%s", signal.signal_id, reason)
+            self.journal.record("risk_blocked", signal_id=signal.signal_id, side=signal.side, reason=reason)
+            _safe_notify(self.notifier, "send_risk_blocked", signal_id=signal.signal_id, reason=reason)
+            state.last_signal_id = signal.signal_id
+            self.state_store.save(state)
+            return state
+
         risk_decision = RiskManager(self.settings).evaluate_signal(
             signal,
             account_snapshot,
             last_signal_id=state.last_signal_id,
+            selected_product=selected_product,
+            product_price=selected_product.ask,
         )
 
         if not risk_decision.approved:
@@ -231,10 +244,6 @@ class BotRunner:
             raw_json=asdict(trade_plan),
         )
 
-        execution_contract = await qualify_contract(
-            ib,
-            build_execution_contract(self.settings, trade_plan.execution_side),
-        )
         result = await OrderManager(
             self.settings,
             ib,
@@ -338,10 +347,20 @@ def _validate_mode_startup(settings: AppSettings) -> None:
 
 def _validate_paper_execution_config(settings: AppSettings) -> None:
     if settings.trading.allowed_directions.long:
-        build_execution_contract(settings, "long")
+        _validate_configured_execution_products(settings, "long")
 
     if settings.trading.allowed_directions.short:
-        build_execution_contract(settings, "short")
+        _validate_configured_execution_products(settings, "short")
+
+
+def _validate_configured_execution_products(settings: AppSettings, side: str) -> None:
+    products = getattr(settings.execution_products, side)
+    enabled_products = [product for product in products if product.enabled]
+    if not enabled_products:
+        raise BotRunnerError(f"At least one enabled execution_products.{side} product is required in paper mode.")
+
+    for product in enabled_products:
+        build_execution_product_contract(product)
 
 
 def _validate_configured_account_id(settings: AppSettings, mode: str) -> None:
