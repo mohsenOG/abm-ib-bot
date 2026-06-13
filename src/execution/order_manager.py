@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from logging_setup.logger import get_logger
+from monitoring.account_guard import account_guard_failures, configured_account_id
 from state.state_store import BotState, StateStore
 from trade_journal.journal import TradeJournal
 
@@ -132,6 +133,8 @@ class OrderManager:
         active_ib = ib if ib is not None else self._connected_ib()
         current_state = self._load_state(state)
         self._guard_duplicate_submission(trade_plan, current_state)
+        self._guard_connected_account(active_ib)
+        self._guard_order_accounts(order_set)
 
         self._logger.info(
             "Submitting paper order. signal_id=%s action=%s quantity=%s",
@@ -189,6 +192,43 @@ class OrderManager:
         mode = getattr(getattr(self._settings, "trading", None), "mode", None)
         if mode != PAPER_MODE:
             raise OrderManagerError("OrderManager submits orders only when trading.mode is paper.")
+
+    def _guard_connected_account(self, ib: Any) -> None:
+        expected_account = configured_account_id(self._settings)
+        if expected_account is None:
+            raise OrderManagerError("IB_ACCOUNT_ID is required before submitting paper orders.")
+
+        managed_accounts = getattr(ib, "managedAccounts", None)
+        if not callable(managed_accounts):
+            raise OrderManagerError("Interactive Brokers client cannot report managed accounts.")
+
+        try:
+            observed_accounts = {account for account in (_optional_text(account) for account in managed_accounts()) if account}
+        except Exception as exc:
+            self._logger.exception("Could not verify IB managed accounts before order submission.")
+            raise OrderManagerError("Could not verify IB managed accounts before order submission.") from exc
+
+        failures = account_guard_failures(
+            expected_account=expected_account,
+            observed_accounts=observed_accounts,
+            mode=PAPER_MODE,
+        )
+        if failures:
+            raise OrderManagerError("; ".join(failures))
+
+    def _guard_order_accounts(self, order_set: BuiltOrderSet) -> None:
+        expected_account = configured_account_id(self._settings)
+        if expected_account is None:
+            raise OrderManagerError("IB_ACCOUNT_ID is required before submitting paper orders.")
+
+        for order in order_set.orders:
+            order_account = _optional_text_attr(order, "account")
+            if order_account is None:
+                raise OrderManagerError("Order account is missing; refusing to submit to Interactive Brokers.")
+            if order_account != expected_account:
+                raise OrderManagerError(
+                    f"Order account mismatch. expected={expected_account} observed={order_account}."
+                )
 
     def _connected_ib(self) -> Any:
         ib = _resolve_ib_client(self._ib_client)
@@ -467,7 +507,7 @@ def _resolve_ib_client(ib_client: Any) -> Any:
 
 
 def _looks_like_ib_client(value: Any) -> bool:
-    return all(callable(getattr(value, name, None)) for name in ("placeOrder", "isConnected"))
+    return all(callable(getattr(value, name, None)) for name in ("placeOrder", "managedAccounts", "isConnected"))
 
 
 def _safe_notify(notifier: Any, method_name: str, **kwargs: Any) -> None:
@@ -478,6 +518,10 @@ def _safe_notify(notifier: Any, method_name: str, **kwargs: Any) -> None:
 
 def _optional_text_attr(source: Any, name: str) -> str | None:
     value = getattr(source, name, None)
+    return _optional_text(value)
+
+
+def _optional_text(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()

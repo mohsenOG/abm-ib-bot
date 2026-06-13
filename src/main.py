@@ -16,6 +16,7 @@ from ib_gateway.account import AccountReader
 from ib_gateway.connection import IBConnection
 from ib_gateway.contracts import build_execution_contract, build_signal_contract, qualify_contract
 from logging_setup.logger import get_logger, setup_logging
+from monitoring.account_guard import AccountGuard, AccountGuardError, configured_account_id
 from monitoring.emergency_stop import EmergencyStop
 from monitoring.health import HealthMonitor, HealthReport
 from monitoring.live_mode import LiveModeGate, LiveModeGateError
@@ -79,6 +80,7 @@ class BotRunner:
             ib = await self.ib_connection.connect()
             _safe_notify(self.notifier, "send_ib_connected")
 
+            await self._run_account_guard(ib=ib)
             signal_contract = await qualify_contract(ib, build_signal_contract(self.settings))
 
             if self.settings.trading.mode == LIVE_MODE:
@@ -257,6 +259,16 @@ class BotRunner:
         )
         raise LiveModeGateError("Live mode readiness checks passed, but live execution is not enabled in this task.")
 
+    async def _run_account_guard(self, *, ib: Any) -> None:
+        if self.settings.trading.mode not in {PAPER_MODE, LIVE_MODE}:
+            return
+
+        account_snapshot = await AccountReader(ib).read_snapshot(include_executions=False)
+        try:
+            AccountGuard(self.settings).run_startup_checks(account_snapshot=account_snapshot)
+        except AccountGuardError as exc:
+            raise BotRunnerError(f"IB account safety check failed: {exc}.") from exc
+
     def _run_health_checks(
         self,
         *,
@@ -307,10 +319,12 @@ def _validate_mode_startup(settings: AppSettings) -> None:
         return
 
     if mode == PAPER_MODE:
+        _validate_configured_account_id(settings, mode)
         _validate_paper_execution_config(settings)
         return
 
     if mode == LIVE_MODE:
+        _validate_configured_account_id(settings, mode)
         return
 
     raise BotRunnerError(f"Unsupported trading mode: {mode}")
@@ -322,6 +336,11 @@ def _validate_paper_execution_config(settings: AppSettings) -> None:
 
     if settings.trading.allowed_directions.short:
         build_execution_contract(settings, "short")
+
+
+def _validate_configured_account_id(settings: AppSettings, mode: str) -> None:
+    if configured_account_id(settings) is None:
+        raise BotRunnerError(f"IB_ACCOUNT_ID is required when trading.mode is {mode}.")
 
 
 def _require_trade_plan(value: TradePlan | None) -> TradePlan:

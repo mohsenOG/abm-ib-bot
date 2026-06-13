@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from logging_setup.logger import get_logger
+from monitoring.account_guard import account_guard_failures, configured_account_id, snapshot_accounts
 from monitoring.health import HealthReport
 from state.state_store import BotState
 
@@ -72,16 +73,11 @@ class LiveModeGate:
         return LiveModeGateResult(passed=True, checks=tuple(passed))
 
     def _account_match_failures(self, account_snapshot: Any) -> list[str]:
-        expected_account = getattr(getattr(self._settings, "ib", None), "account_id", None)
-        if expected_account is None:
-            return []
-
-        accounts = _snapshot_accounts(account_snapshot)
-        mismatches = sorted(account for account in accounts if account and account != expected_account)
-        if mismatches:
-            return [f"IB account mismatch. expected={expected_account} observed={','.join(mismatches)}"]
-
-        return []
+        return account_guard_failures(
+            expected_account=configured_account_id(self._settings),
+            observed_accounts=snapshot_accounts(account_snapshot),
+            mode="live",
+        )
 
     def _reconciliation_failures(self, account_snapshot: Any, state: BotState) -> list[str]:
         failures: list[str] = []
@@ -124,27 +120,6 @@ class LiveModeGate:
             return "Telegram live check failed"
 
         return None
-
-
-def _snapshot_accounts(account_snapshot: Any) -> set[str]:
-    accounts: set[str] = set()
-
-    for value in getattr(account_snapshot, "account_values", ()):
-        account = str(getattr(value, "account", "") or "").strip()
-        if account:
-            accounts.add(account)
-
-    for position in getattr(account_snapshot, "positions", ()):
-        account = str(getattr(position, "account", "") or "").strip()
-        if account:
-            accounts.add(account)
-
-    for order in getattr(account_snapshot, "open_orders", ()):
-        account = str(getattr(order, "account", "") or "").strip()
-        if account:
-            accounts.add(account)
-
-    return accounts
 
 
 def _unknown_active_open_orders(account_snapshot: Any, state: BotState) -> list[str]:

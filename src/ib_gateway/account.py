@@ -81,6 +81,7 @@ class ExecutionSnapshot:
 @dataclass(frozen=True)
 class AccountSnapshot:
     read_at: str
+    managed_accounts: tuple[str, ...]
     account_values: tuple[AccountValueSnapshot, ...]
     positions: tuple[PositionSnapshot, ...]
     open_orders: tuple[OpenOrderSnapshot, ...]
@@ -100,11 +101,24 @@ class AccountReader:
         self._logger.info("Reading IB account snapshot.")
         return AccountSnapshot(
             read_at=datetime.now(timezone.utc).isoformat(),
+            managed_accounts=self.read_managed_accounts(),
             account_values=self.read_account_values(),
             positions=await self.read_positions(),
             open_orders=await self.read_open_orders(),
             executions=await self.read_executions() if include_executions else (),
         )
+
+    def read_managed_accounts(self) -> tuple[str, ...]:
+        """Return all accounts exposed by the connected IB session."""
+
+        ib = self._connected_ib()
+        try:
+            accounts = ib.managedAccounts()
+        except Exception as exc:
+            self._logger.exception("Failed to read IB managed accounts.")
+            raise AccountReadError("Failed to read Interactive Brokers managed accounts.") from exc
+
+        return tuple(account for account in (_optional_clean_string(account) for account in accounts) if account)
 
     def read_account_values(self) -> tuple[AccountValueSnapshot, ...]:
         """Return normalized IB account values."""
@@ -182,6 +196,7 @@ def _looks_like_ib_client(value: Any) -> bool:
         callable(getattr(value, name, None))
         for name in (
             "accountValues",
+            "managedAccounts",
             "reqPositionsAsync",
             "reqOpenOrdersAsync",
             "reqExecutionsAsync",
@@ -278,6 +293,13 @@ def _optional_string_attr(source: Any, name: str) -> str | None:
         return None
     text = str(value)
     return text if text else None
+
+
+def _optional_clean_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _float_attr(source: Any, name: str) -> float:
