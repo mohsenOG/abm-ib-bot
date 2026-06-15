@@ -7,6 +7,19 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from domain.constants import (
+    ACTIVE_ORDER_STATUSES,
+    ORDER_STATUS_CANCELLED,
+    ORDER_STATUS_FILLED,
+    ORDER_STATUS_INACTIVE,
+    ORDER_STATUS_PARTIALLY_FILLED,
+    ORDER_STATUS_PENDING_SUBMIT,
+    ORDER_STATUS_PRE_SUBMITTED,
+    ORDER_STATUS_REJECTED,
+    ORDER_STATUS_SUBMITTED,
+    PAPER_MODE,
+    TERMINAL_ORDER_STATUSES,
+)
 from logging_setup.logger import get_logger
 from monitoring.account_guard import account_guard_failures, configured_account_id
 from state.state_store import BotState, StateStore
@@ -14,13 +27,6 @@ from trade_journal.journal import TradeJournal
 
 from execution.order_builder import BuiltOrderSet, EntryOrderType, OrderBuilder
 
-
-PAPER_MODE = "paper"
-ACTIVE_STATUSES = {"PendingSubmit", "PreSubmitted", "Submitted", "PartiallyFilled"}
-TERMINAL_STATUSES = {"Filled", "Cancelled", "Inactive", "Rejected"}
-KNOWN_STATUSES = ACTIVE_STATUSES | TERMINAL_STATUSES
-ENTRY_FILL_TIMEOUT_SECONDS = 60.0
-PROTECTIVE_SUBMIT_TIMEOUT_SECONDS = 10.0
 
 JournalStatusEvent = Literal[
     "order_submitted",
@@ -51,7 +57,7 @@ class ManagedOrderStatus:
 
     @property
     def is_terminal(self) -> bool:
-        return self.status in TERMINAL_STATUSES
+        return self.status in TERMINAL_ORDER_STATUSES
 
 
 @dataclass(frozen=True)
@@ -81,6 +87,17 @@ class OrderManager:
         self._journal = journal
         self._notifier = notifier
         self._builder = order_builder or OrderBuilder(account_id=getattr(getattr(settings, "ib", None), "account_id", None))
+        execution_settings = getattr(settings, "execution", None)
+        self._entry_order_type = _entry_order_type_setting(execution_settings)
+        self._entry_fill_timeout_seconds = _positive_float_setting(
+            execution_settings,
+            "entry_fill_timeout_seconds",
+        )
+        self._protective_submit_timeout_seconds = _positive_float_setting(
+            execution_settings,
+            "protective_submit_timeout_seconds",
+        )
+        self._status_poll_seconds = _positive_float_setting(execution_settings, "status_poll_seconds")
         self._logger = get_logger("execution.order_manager")
         self._seen_order_events: set[str] = set()
 
@@ -89,7 +106,7 @@ class OrderManager:
         *,
         contract: Any,
         trade_plan: Any,
-        order_type: EntryOrderType = "market",
+        order_type: EntryOrderType | None = None,
         limit_price: float | None = None,
         state: BotState | None = None,
     ) -> ManagedOrderResult:
@@ -102,7 +119,7 @@ class OrderManager:
 
         order_set = self._builder.build_order_set(
             trade_plan,
-            order_type=order_type,
+            order_type=order_type or self._entry_order_type,
             limit_price=limit_price,
         )
         return await self.submit_order_set(
@@ -168,7 +185,7 @@ class OrderManager:
             trade,
             trade_plan=trade_plan,
             state=updated_state,
-            timeout_seconds=ENTRY_FILL_TIMEOUT_SECONDS,
+            timeout_seconds=self._entry_fill_timeout_seconds,
         )
         updated_state = self._process_status_update(
             filled_status,
@@ -214,15 +231,15 @@ class OrderManager:
 
         while asyncio.get_running_loop().time() <= deadline:
             last_status = _managed_status(trade, trade_plan)
-            if last_status.status == "Filled":
+            if last_status.status == ORDER_STATUS_FILLED:
                 if last_status.avg_fill_price <= 0 or last_status.filled <= 0:
                     raise OrderManagerError("Entry order filled without a usable average fill price.")
                 return last_status
 
-            if last_status.status in {"Cancelled", "Inactive", "Rejected"}:
+            if last_status.status in TERMINAL_ORDER_STATUSES - {ORDER_STATUS_FILLED}:
                 raise OrderManagerError(f"Entry order reached terminal status before fill: {last_status.status}.")
 
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(self._status_poll_seconds)
 
         if last_status.filled > 0 and last_status.avg_fill_price > 0:
             raise OrderManagerError(
@@ -290,19 +307,19 @@ class OrderManager:
         protective_trades: tuple[Any, ...],
         trade_plan: Any,
     ) -> None:
-        deadline = asyncio.get_running_loop().time() + PROTECTIVE_SUBMIT_TIMEOUT_SECONDS
+        deadline = asyncio.get_running_loop().time() + self._protective_submit_timeout_seconds
 
         while asyncio.get_running_loop().time() <= deadline:
             statuses = [_managed_status(trade, trade_plan) for trade in protective_trades]
-            if all(status.order_id is not None and status.status in ACTIVE_STATUSES for status in statuses):
+            if all(status.order_id is not None and status.status in ACTIVE_ORDER_STATUSES for status in statuses):
                 return
 
-            failed = [status for status in statuses if status.status in {"Cancelled", "Inactive", "Rejected"}]
+            failed = [status for status in statuses if status.status in TERMINAL_ORDER_STATUSES - {ORDER_STATUS_FILLED}]
             if failed:
                 details = ", ".join(f"order_id={status.order_id} status={status.status}" for status in failed)
                 raise OrderManagerError(f"Protective OCA order rejected or inactive: {details}.")
 
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(self._status_poll_seconds)
 
         details = ", ".join(
             f"order_id={status.order_id} status={status.status}"
@@ -435,7 +452,7 @@ class OrderManager:
         active_signal_id = active_trade.get("signal_id")
         active_status = active_trade.get("status")
 
-        if signal_id is not None and active_signal_id == signal_id and active_status not in TERMINAL_STATUSES:
+        if signal_id is not None and active_signal_id == signal_id and active_status not in TERMINAL_ORDER_STATUSES:
             raise OrderManagerError(f"Active trade already exists for signal_id={signal_id}.")
 
         known_signal_id = active_trade.get("submitted_signal_id")
@@ -492,7 +509,7 @@ class OrderManager:
 
         side = getattr(trade_plan, "signal_side", None)
 
-        if status.status in {"PendingSubmit", "PreSubmitted", "Submitted"}:
+        if status.status in {ORDER_STATUS_PENDING_SUBMIT, ORDER_STATUS_PRE_SUBMITTED, ORDER_STATUS_SUBMITTED}:
             _safe_notify(
                 self._notifier,
                 "send_order_submitted",
@@ -501,7 +518,7 @@ class OrderManager:
                 quantity=status.total_quantity,
                 price=None,
             )
-        elif status.status == "PartiallyFilled":
+        elif status.status == ORDER_STATUS_PARTIALLY_FILLED:
             _safe_notify(
                 self._notifier,
                 "send_fill",
@@ -511,7 +528,7 @@ class OrderManager:
                 quantity=status.filled,
                 price=status.avg_fill_price,
             )
-        elif status.status == "Filled":
+        elif status.status == ORDER_STATUS_FILLED:
             _safe_notify(
                 self._notifier,
                 "send_fill",
@@ -521,9 +538,9 @@ class OrderManager:
                 quantity=status.filled,
                 price=status.avg_fill_price,
             )
-        elif status.status == "Cancelled":
+        elif status.status == ORDER_STATUS_CANCELLED:
             _safe_notify(self._notifier, "send_order_cancelled", order_id=status.order_id, reason="Order cancelled.")
-        elif status.status in {"Inactive", "Rejected"}:
+        elif status.status in {ORDER_STATUS_INACTIVE, ORDER_STATUS_REJECTED}:
             _safe_notify(self._notifier, "send_order_rejected", order_id=status.order_id, reason=status.status)
 
     def _attach_trade_event_handlers(self, trade: Any, trade_plan: Any, state: BotState | None) -> None:
@@ -640,17 +657,17 @@ def _status_event_key(status: ManagedOrderStatus) -> str:
 
 
 def _journal_event_type(status: ManagedOrderStatus) -> JournalStatusEvent | None:
-    if status.status in {"PendingSubmit", "PreSubmitted", "Submitted"}:
+    if status.status in {ORDER_STATUS_PENDING_SUBMIT, ORDER_STATUS_PRE_SUBMITTED, ORDER_STATUS_SUBMITTED}:
         return "order_submitted"
-    if status.status == "PartiallyFilled":
+    if status.status == ORDER_STATUS_PARTIALLY_FILLED:
         return "order_partially_filled"
-    if status.status == "Filled":
+    if status.status == ORDER_STATUS_FILLED:
         return "order_filled"
-    if status.status == "Cancelled":
+    if status.status == ORDER_STATUS_CANCELLED:
         return "order_cancelled"
-    if status.status == "Inactive":
+    if status.status == ORDER_STATUS_INACTIVE:
         return "order_inactive"
-    if status.status == "Rejected":
+    if status.status == ORDER_STATUS_REJECTED:
         return "order_rejected"
     return None
 
@@ -749,6 +766,23 @@ def _resolve_ib_client(ib_client: Any) -> Any:
 
 def _looks_like_ib_client(value: Any) -> bool:
     return all(callable(getattr(value, name, None)) for name in ("placeOrder", "managedAccounts", "isConnected"))
+
+
+def _entry_order_type_setting(source: Any) -> EntryOrderType:
+    value = getattr(source, "entry_order_type", None)
+    if value == "market":
+        return "market"
+    raise OrderManagerError("execution.entry_order_type must be market.")
+
+
+def _positive_float_setting(source: Any, name: str) -> float:
+    value = getattr(source, name, None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise OrderManagerError(f"execution.{name} must be a positive number.")
+    result = float(value)
+    if result <= 0:
+        raise OrderManagerError(f"execution.{name} must be greater than zero.")
+    return result
 
 
 def _safe_notify(notifier: Any, method_name: str, **kwargs: Any) -> None:

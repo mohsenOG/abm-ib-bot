@@ -74,8 +74,8 @@ class JournalEvent:
 class TradeJournal:
     """Write trading events to the configured CSV journal."""
 
-    def __init__(self) -> None:
-        self.journal_file = _load_journal_file_from_settings()
+    def __init__(self, journal_file: str | Path) -> None:
+        self.journal_file = Path(journal_file)
         self._ensure_header()
 
     def append(self, event: JournalEvent) -> None:
@@ -211,40 +211,3 @@ def _redact_sensitive_values(value: Any) -> Any:
         return [_redact_sensitive_values(item) for item in value]
 
     return value
-
-
-def _load_journal_file_from_settings() -> Path:
-    project_root = Path(__file__).resolve().parents[2]
-    settings_file = project_root / "settings.yml"
-
-    try:
-        import yaml
-    except ModuleNotFoundError as exc:
-        raise TradeJournalError(
-            "PyYAML is required to load paths.trade_journal_file from settings.yml."
-        ) from exc
-
-    if not settings_file.exists():
-        raise TradeJournalError(f"Settings file not found: {settings_file}")
-
-    try:
-        with settings_file.open("r", encoding="utf-8") as file_obj:
-            raw = yaml.safe_load(file_obj)
-    except OSError as exc:
-        raise TradeJournalError(f"Could not read settings file: {settings_file}") from exc
-
-    if not isinstance(raw, dict):
-        raise TradeJournalError("settings.yml must contain a YAML mapping at the root.")
-
-    paths = raw.get("paths")
-    if not isinstance(paths, dict):
-        raise TradeJournalError("settings.yml must contain a paths section.")
-
-    journal_path = paths.get("trade_journal_file")
-    if not isinstance(journal_path, str) or not journal_path.strip():
-        raise TradeJournalError("settings.yml paths.trade_journal_file is required.")
-
-    path = Path(journal_path.strip())
-    if path.is_absolute():
-        return path
-    return project_root / path

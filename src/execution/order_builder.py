@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from ib_async import LimitOrder, MarketOrder, Order, StopOrder
 
+from domain.constants import BROKER_ACTION_BUY, BROKER_ACTION_SELL, BROKER_ACTIONS
 
 OrderAction = Literal["BUY", "SELL"]
 EntryOrderType = Literal["market", "limit"]
@@ -204,13 +205,13 @@ class OrderBuilder:
 
 def _order_action(trade_plan: Any) -> OrderAction:
     value = getattr(trade_plan, "order_action", None)
-    if value not in {"BUY", "SELL"}:
+    if value not in BROKER_ACTIONS:
         raise OrderBuilderError("trade_plan.order_action must be BUY or SELL.")
     return value
 
 
 def _opposite_action(action: OrderAction) -> OrderAction:
-    return "SELL" if action == "BUY" else "BUY"
+    return BROKER_ACTION_SELL if action == BROKER_ACTION_BUY else BROKER_ACTION_BUY
 
 
 def _apply_common_fields(order: Order, *, account_id: str | None, order_ref: str | None) -> None:

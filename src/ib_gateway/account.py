@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from ib_gateway.constants import IB_UNSET_PRICE
 from logging_setup.logger import get_logger
 
 
@@ -329,4 +330,4 @@ def _optional_price_attr(source: Any, name: str) -> float | None:
     if value is None:
         return None
     price = float(value)
-    return price if price < 1e100 else None
+    return price if price < IB_UNSET_PRICE else None

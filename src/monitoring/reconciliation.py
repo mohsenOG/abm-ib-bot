@@ -5,10 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from domain.constants import ACTIVE_ORDER_STATUSES
 from state.state_store import BotState
-
-
-ACTIVE_ORDER_STATUSES = {"PendingSubmit", "PreSubmitted", "Submitted", "PartiallyFilled"}
 
 
 class AccountReconciliationError(RuntimeError):

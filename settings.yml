@@ -1,9 +1,15 @@
 trading:
   mode: alert_only
-  timeframe: 1 hour
   allowed_directions:
     long: true
     short: true
+
+market_data:
+  bar_size: 1 hour
+  historical_duration: 30 D
+  what_to_show: MIDPOINT
+  use_rth: false
+  candle_close_buffer_seconds: 5
 
 ib:
   host: 127.0.0.1
@@ -23,17 +29,36 @@ signal_instrument:
   currency: USD
   expiry: null
 
+execution:
+  products_file: execution_products.json
+  entry_order_type: market
+  entry_fill_timeout_seconds: 60
+  protective_submit_timeout_seconds: 10
+  status_poll_seconds: 0.25
+  quote_poll_seconds: 0.25
+
+sizing:
+  min_quantity: 1
+  quantity_step: 1
+  allow_fractional: false
+
 risk:
   initial_capital: 1000
   capital_slots: 10
   max_concurrent_position_slots: 1
 
 strategy:
+  model_version: abm_21_vote_v1
   bias_threshold: 0.2
   use_heikin_ashi: true
   atr_length: 14
   sl_atr_mult: 1.0
   tp_atr_mult: 2.0
+
+health:
+  market_data_max_age_seconds: 7200
+  last_processed_candle_max_age_seconds: 10800
+  repeated_error_limit: 3
 
 runtime:
   poll_seconds: 300

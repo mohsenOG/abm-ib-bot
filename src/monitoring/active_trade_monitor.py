@@ -9,18 +9,22 @@ from math import isclose, isfinite
 from types import SimpleNamespace
 from typing import Any
 
+from domain.constants import (
+    ACTIVE_ORDER_STATUSES,
+    BROKER_ACTION_BUY,
+    BROKER_ACTION_SELL,
+    SIGNAL_DIRECTIONS,
+    SIGNAL_DIRECTION_BUY,
+    TERMINAL_TRADE_STATUSES,
+)
 from execution.order_builder import OrderBuilder
 from execution.product_selector import ProductQuote
 from ib_gateway.account import AccountReader, AccountSnapshot, OpenOrderSnapshot, PositionSnapshot
+from ib_gateway.constants import IB_UNSET_PRICE, LIVE_MARKET_DATA_TYPE
 from ib_gateway.contracts import build_execution_product_contract, qualify_contract
 from logging_setup.logger import get_logger
 from monitoring.emergency_stop import EmergencyStop
 from state.state_store import BotState, StateStore
-
-
-ACTIVE_ORDER_STATUSES = {"PendingSubmit", "PreSubmitted", "Submitted", "PartiallyFilled"}
-TERMINAL_TRADE_STATUSES = {"Cancelled", "Inactive", "Rejected", "Closed"}
-PROTECTIVE_SUBMIT_TIMEOUT_SECONDS = 10.0
 
 
 class ActiveTradeMonitorError(RuntimeError):
@@ -74,6 +78,13 @@ class ActiveTradeMonitor:
         self._notifier = notifier
         self._emergency_stop = emergency_stop
         self._interval_seconds = interval_seconds or settings.runtime.active_trade_monitor_seconds
+        execution_settings = getattr(settings, "execution", None)
+        self._protective_submit_timeout_seconds = _positive_float_setting(
+            execution_settings,
+            "protective_submit_timeout_seconds",
+        )
+        self._status_poll_seconds = _positive_float_setting(execution_settings, "status_poll_seconds")
+        self._quote_poll_seconds = _positive_float_setting(execution_settings, "quote_poll_seconds")
         account_id = getattr(getattr(settings, "ib", None), "account_id", None)
         self._builder = order_builder or OrderBuilder(account_id=account_id)
         self._logger = get_logger("monitoring.active_trade")
@@ -150,7 +161,7 @@ class ActiveTradeMonitor:
         ib = self._ib_client
         request_market_data_type = getattr(ib, "reqMarketDataType", None)
         if callable(request_market_data_type):
-            request_market_data_type(1)
+            request_market_data_type(LIVE_MARKET_DATA_TYPE)
 
         ticker = None
         try:
@@ -171,7 +182,7 @@ class ActiveTradeMonitor:
                 return _quote_from_ticker(ticker, max_age_seconds=max_age_seconds)
             except ActiveTradeMonitorError as exc:
                 last_error = str(exc)
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(self._quote_poll_seconds)
 
         raise ActiveTradeMonitorError(last_error)
 
@@ -344,7 +355,7 @@ class ActiveTradeMonitor:
         await self._wait_for_protection(active_trade)
 
     async def _wait_for_protection(self, active_trade: dict[str, Any]) -> None:
-        deadline = asyncio.get_running_loop().time() + PROTECTIVE_SUBMIT_TIMEOUT_SECONDS
+        deadline = asyncio.get_running_loop().time() + self._protective_submit_timeout_seconds
         last_missing: tuple[str, ...] = ()
 
         while asyncio.get_running_loop().time() <= deadline:
@@ -353,7 +364,7 @@ class ActiveTradeMonitor:
             if health.healthy:
                 return
             last_missing = health.missing_labels
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(self._status_poll_seconds)
 
         raise ActiveTradeMonitorError(f"protective orders were not confirmed. missing={','.join(last_missing)}")
 
@@ -539,7 +550,7 @@ def _usable_price_attr(source: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ActiveTradeMonitorError(f"Quote {name} is missing.")
     result = float(value)
-    if not isfinite(result) or result <= 0 or result >= 1e100:
+    if not isfinite(result) or result <= 0 or result >= IB_UNSET_PRICE:
         raise ActiveTradeMonitorError(f"Quote {name} is invalid.")
     return result
 
@@ -554,23 +565,23 @@ def _is_take_profit_order(order: OpenOrderSnapshot) -> bool:
 
 def _entry_order_action(active_trade: dict[str, Any]) -> str:
     action = _optional_text(active_trade.get("action"))
-    if action in {"BUY", "SELL"}:
+    if action in SIGNAL_DIRECTIONS:
         return action
     signal_side = _optional_text(active_trade.get("signal_side"))
-    if signal_side in {"BUY", "SELL"}:
+    if signal_side in SIGNAL_DIRECTIONS:
         return signal_side
     raise ActiveTradeMonitorError("Active trade entry action is missing.")
 
 
 def _exit_order_action(active_trade: dict[str, Any]) -> str:
-    return "SELL" if _entry_order_action(active_trade) == "BUY" else "BUY"
+    return BROKER_ACTION_SELL if _entry_order_action(active_trade) == BROKER_ACTION_BUY else BROKER_ACTION_BUY
 
 
 def _execution_side_matches(side: str, exit_action: str) -> bool:
     normalized = str(side or "").upper()
     if normalized == exit_action:
         return True
-    if exit_action == "BUY":
+    if exit_action == SIGNAL_DIRECTION_BUY:
         return normalized == "BOT"
     return normalized == "SLD"
 
@@ -628,6 +639,16 @@ def _optional_positive_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return result if result > 0 else None
+
+
+def _positive_float_setting(source: Any, name: str) -> float:
+    value = getattr(source, name, None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ActiveTradeMonitorError(f"execution.{name} must be a positive number.")
+    result = float(value)
+    if result <= 0:
+        raise ActiveTradeMonitorError(f"execution.{name} must be greater than zero.")
+    return result
 
 
 def _issue_key(prefix: str, active_trade: dict[str, Any], suffix: str | None = None) -> str:

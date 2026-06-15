@@ -11,18 +11,22 @@ from typing import Any, Literal
 from ib_async import MarketOrder
 
 from config.settings import AppSettings, ExecutionProductSettings
+from domain.constants import (
+    BROKER_ACTION_BUY,
+    EXECUTION_SIDE_LONG,
+    EXECUTION_SIDE_SHORT,
+    SIGNAL_DIRECTION_BUY,
+    SIGNAL_DIRECTION_SELL,
+)
+from ib_gateway.constants import IB_UNSET_PRICE, LIVE_MARKET_DATA_TYPE, NON_LIVE_MARKET_DATA_TYPES
 from ib_gateway.contracts import build_execution_product_contract, qualify_contract
 from logging_setup.logger import get_logger
 from risk.risk_manager import ExecutionProduct
-from risk.sizing import QuantityRules, RiskSizingError, calculate_quantity
+from risk.sizing import QuantityRules, RiskSizingError, calculate_quantity, quantity_rules_from_settings
 
 
 SignalSide = Literal["BUY", "SELL"]
 ExecutionSide = Literal["long", "short"]
-ORDER_ACTION = "BUY"
-UNSET_PRICE = 1e100
-LIVE_MARKET_DATA_TYPE = 1
-NON_LIVE_MARKET_DATA_TYPES = {2, 3, 4}
 
 
 class ProductSelectionError(RuntimeError):
@@ -57,7 +61,11 @@ class ProductSelector:
     ) -> None:
         self._settings = settings
         self._ib_client = ib_client
-        self._quantity_rules = quantity_rules or QuantityRules()
+        self._quantity_rules = quantity_rules or quantity_rules_from_settings(settings.sizing)
+        self._quote_poll_seconds = _positive_float_setting(
+            settings.execution,
+            "quote_poll_seconds",
+        )
         self._logger = get_logger("execution.product_selector")
 
     async def select_for_signal(self, side: SignalSide) -> tuple[ExecutionProduct, Any]:
@@ -186,7 +194,7 @@ class ProductSelector:
                 return _quote_from_ticker(ticker, max_age_seconds=max_age_seconds)
             except ProductSelectionError as exc:
                 last_error = str(exc)
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(self._quote_poll_seconds)
 
         raise ProductSelectionError(last_error)
 
@@ -199,7 +207,7 @@ class ProductSelector:
         currency: str,
     ) -> float:
         ib = self._connected_ib()
-        order = MarketOrder(ORDER_ACTION, quantity)
+        order = MarketOrder(BROKER_ACTION_BUY, quantity)
         account_id = getattr(self._settings.ib, "account_id", None)
         if account_id is not None:
             order.account = account_id
@@ -227,10 +235,10 @@ class ProductSelector:
 
 
 def _execution_side_for_signal(side: SignalSide) -> ExecutionSide:
-    if side == "BUY":
-        return "long"
-    if side == "SELL":
-        return "short"
+    if side == SIGNAL_DIRECTION_BUY:
+        return EXECUTION_SIDE_LONG
+    if side == SIGNAL_DIRECTION_SELL:
+        return EXECUTION_SIDE_SHORT
     raise ProductSelectionError("Signal side must be BUY or SELL.")
 
 
@@ -326,6 +334,16 @@ def _resolve_ib_client(ib_client: Any) -> Any:
     raise ProductSelectionError("ProductSelector requires an Interactive Brokers client.")
 
 
+def _positive_float_setting(source: Any, name: str) -> float:
+    value = getattr(source, name, None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProductSelectionError(f"execution.{name} must be a positive number.")
+    result = float(value)
+    if result <= 0:
+        raise ProductSelectionError(f"execution.{name} must be greater than zero.")
+    return result
+
+
 def _required_quote_time(ticker: Any) -> datetime:
     value = getattr(ticker, "time", None)
     if value is None:
@@ -350,7 +368,7 @@ def _usable_price_attr(source: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ProductSelectionError(f"Quote {name} is missing.")
     result = float(value)
-    if not math.isfinite(result) or result <= 0 or result >= UNSET_PRICE:
+    if not math.isfinite(result) or result <= 0 or result >= IB_UNSET_PRICE:
         raise ProductSelectionError(f"Quote {name} is invalid.")
     return result
 
@@ -360,7 +378,7 @@ def _usable_money_attr(source: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ProductSelectionError(f"IB {name} is missing.")
     result = float(value)
-    if not math.isfinite(result) or result < 0 or result >= UNSET_PRICE:
+    if not math.isfinite(result) or result < 0 or result >= IB_UNSET_PRICE:
         raise ProductSelectionError(f"IB {name} is invalid.")
     return result
 

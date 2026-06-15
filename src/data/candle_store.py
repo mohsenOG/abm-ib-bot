@@ -8,27 +8,8 @@ from typing import Any
 
 import pandas as pd
 
-
-CANDLE_INTERVAL = pd.Timedelta(hours=1)
-REQUIRED_CANDLE_COLUMNS = (
-    "timestamp",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "average",
-    "bar_count",
-)
-NUMERIC_CANDLE_COLUMNS = (
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "average",
-    "bar_count",
-)
+from data.schema import CANDLE_TIMESTAMP, NUMERIC_CANDLE_COLUMNS, REQUIRED_CANDLE_COLUMNS
+from data.timeframes import bar_size_to_timedelta
 
 
 class CandleStoreError(ValueError):
@@ -53,15 +34,17 @@ class CandleStoreUpdate:
 
 
 class CandleStore:
-    """Store closed 1-hour candles, deduplicated and sorted by timestamp."""
+    """Store closed candles, deduplicated and sorted by timestamp."""
 
     def __init__(
         self,
         candles: pd.DataFrame | None = None,
         *,
+        bar_size: str,
         latest_processed_candle_ts: Any | None = None,
     ) -> None:
         self._candles = _empty_candle_frame()
+        self._candle_interval = bar_size_to_timedelta(bar_size)
         self._latest_processed_candle_ts = _optional_timestamp(latest_processed_candle_ts)
 
         if candles is not None:
@@ -75,7 +58,7 @@ class CandleStore:
     def latest_closed_candle_ts(self) -> pd.Timestamp | None:
         if self._candles.empty:
             return None
-        return self._candles.iloc[-1]["timestamp"]
+        return self._candles.iloc[-1][CANDLE_TIMESTAMP]
 
     def update(self, candles: pd.DataFrame) -> CandleStoreUpdate:
         """Merge closed candles into the store and return update metadata."""
@@ -124,7 +107,7 @@ class CandleStore:
         if self._latest_processed_candle_ts is None:
             return self._candles.copy()
 
-        mask = self._candles["timestamp"] > self._latest_processed_candle_ts
+        mask = self._candles[CANDLE_TIMESTAMP] > self._latest_processed_candle_ts
         return self._candles.loc[mask].reset_index(drop=True).copy()
 
     def mark_processed(self, timestamp: Any) -> None:
@@ -141,20 +124,20 @@ class CandleStore:
         self._latest_processed_candle_ts = processed_ts
 
     def detect_missing_candles(self) -> tuple[CandleGap, ...]:
-        """Return detected gaps larger than the expected 1-hour interval."""
+        """Return detected gaps larger than the configured candle interval."""
 
-        return _detect_missing_candles(self._candles)
+        return _detect_missing_candles(self._candles, self._candle_interval)
 
     def _contains_timestamp(self, timestamp: pd.Timestamp) -> bool:
         if self._candles.empty:
             return False
-        return bool((self._candles["timestamp"] == timestamp).any())
+        return bool((self._candles[CANDLE_TIMESTAMP] == timestamp).any())
 
 
 def _merge_candles(current: pd.DataFrame, new_candles: pd.DataFrame) -> pd.DataFrame:
     merged = pd.concat([current, new_candles], ignore_index=True)
-    merged = merged.drop_duplicates(subset=["timestamp"], keep="last")
-    merged = merged.sort_values("timestamp").reset_index(drop=True)
+    merged = merged.drop_duplicates(subset=[CANDLE_TIMESTAMP], keep="last")
+    merged = merged.sort_values(CANDLE_TIMESTAMP).reset_index(drop=True)
     return merged.loc[:, REQUIRED_CANDLE_COLUMNS]
 
 
@@ -165,9 +148,9 @@ def _clean_candles(candles: pd.DataFrame) -> pd.DataFrame:
     _validate_columns(candles)
 
     clean = candles.loc[:, REQUIRED_CANDLE_COLUMNS].copy()
-    clean["timestamp"] = clean["timestamp"].map(_normalize_timestamp)
+    clean[CANDLE_TIMESTAMP] = clean[CANDLE_TIMESTAMP].map(_normalize_timestamp)
 
-    if clean["timestamp"].isna().any():
+    if clean[CANDLE_TIMESTAMP].isna().any():
         raise CandleStoreError("Candles contain missing or invalid timestamps.")
 
     for column in NUMERIC_CANDLE_COLUMNS:
@@ -176,8 +159,8 @@ def _clean_candles(candles: pd.DataFrame) -> pd.DataFrame:
     if clean.loc[:, NUMERIC_CANDLE_COLUMNS].isna().any().any():
         raise CandleStoreError("Candles contain missing numeric values.")
 
-    clean = clean.drop_duplicates(subset=["timestamp"], keep="last")
-    clean = clean.sort_values("timestamp").reset_index(drop=True)
+    clean = clean.drop_duplicates(subset=[CANDLE_TIMESTAMP], keep="last")
+    clean = clean.sort_values(CANDLE_TIMESTAMP).reset_index(drop=True)
     return clean
 
 
@@ -188,19 +171,19 @@ def _validate_columns(candles: pd.DataFrame) -> None:
         raise CandleStoreError(f"Candle DataFrame is missing required columns: {missing_columns}.")
 
 
-def _detect_missing_candles(candles: pd.DataFrame) -> tuple[CandleGap, ...]:
+def _detect_missing_candles(candles: pd.DataFrame, candle_interval: pd.Timedelta) -> tuple[CandleGap, ...]:
     if len(candles) < 2:
         return ()
 
-    timestamps = list(candles["timestamp"])
+    timestamps = list(candles[CANDLE_TIMESTAMP])
     gaps: list[CandleGap] = []
 
     for previous_timestamp, next_timestamp in zip(timestamps, timestamps[1:]):
         delta = next_timestamp - previous_timestamp
-        if delta <= CANDLE_INTERVAL:
+        if delta <= candle_interval:
             continue
 
-        missing_count = int(delta / CANDLE_INTERVAL) - 1
+        missing_count = int(delta / candle_interval) - 1
         if missing_count <= 0:
             continue
 
@@ -208,8 +191,8 @@ def _detect_missing_candles(candles: pd.DataFrame) -> tuple[CandleGap, ...]:
             CandleGap(
                 previous_timestamp=previous_timestamp,
                 next_timestamp=next_timestamp,
-                missing_from=previous_timestamp + CANDLE_INTERVAL,
-                missing_to=next_timestamp - CANDLE_INTERVAL,
+                missing_from=previous_timestamp + candle_interval,
+                missing_to=next_timestamp - candle_interval,
                 missing_count=missing_count,
             )
         )

@@ -94,6 +94,8 @@ src/data/
 
 src/strategy/
 
+src/domain/
+
 src/risk/
 
 src/execution/

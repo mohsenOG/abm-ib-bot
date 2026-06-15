@@ -8,20 +8,23 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from config.settings import AppSettings, RiskSettings
-from risk.sizing import QuantityRules, RiskSizingError, calculate_quantity
+from domain.constants import (
+    ACTIVE_ORDER_STATUSES,
+    ALERT_ONLY_MODE,
+    BROKER_ACTION_BUY,
+    EXECUTION_SIDE_LONG,
+    EXECUTION_SIDE_SHORT,
+    SIGNAL_DIRECTION_BUY,
+    SIGNAL_DIRECTION_SELL,
+    SIGNAL_DIRECTIONS,
+)
+from risk.sizing import QuantityRules, RiskSizingError, calculate_quantity, quantity_rules_from_settings
 
 
 SignalSide = Literal["BUY", "SELL"]
 ExecutionSide = Literal["long", "short"]
 OrderAction = Literal["BUY", "SELL"]
 RiskDecisionStatus = Literal["approved", "blocked"]
-
-ACTIVE_ORDER_STATUSES = {
-    "PendingSubmit",
-    "PreSubmitted",
-    "Submitted",
-    "PartiallyFilled",
-}
 
 
 class RiskManagerError(ValueError):
@@ -92,7 +95,7 @@ class RiskManager:
     ) -> None:
         self._settings = settings
         self._risk = settings.risk
-        self._quantity_rules = quantity_rules or QuantityRules()
+        self._quantity_rules = quantity_rules or quantity_rules_from_settings(settings.sizing)
 
     def evaluate_signal(
         self,
@@ -117,16 +120,16 @@ class RiskManager:
             return _blocked(quote_error)
         effective_product_price = product.ask
 
-        if self._settings.trading.mode == "alert_only":
+        if self._settings.trading.mode == ALERT_ONLY_MODE:
             return _blocked("Trading mode is alert_only.")
 
         if normalized_signal.signal_id == last_signal_id:
             return _blocked("Signal was already processed.")
 
-        if normalized_signal.side == "BUY" and not self._settings.trading.allowed_directions.long:
+        if normalized_signal.side == SIGNAL_DIRECTION_BUY and not self._settings.trading.allowed_directions.long:
             return _blocked("Long trades are disabled by trading.allowed_directions.long.")
 
-        if normalized_signal.side == "SELL" and not self._settings.trading.allowed_directions.short:
+        if normalized_signal.side == SIGNAL_DIRECTION_SELL and not self._settings.trading.allowed_directions.short:
             return _blocked("Short trades are disabled by trading.allowed_directions.short.")
 
         if _has_unmatched_active_position(account_snapshot, product):
@@ -222,7 +225,7 @@ def _normalize_signal(signal: Any) -> _NormalizedSignal:
     raw_side = _required_text_attr(signal, "side").upper()
     price = _positive_float_attr(signal, "price")
 
-    if raw_side not in {"BUY", "SELL"}:
+    if raw_side not in SIGNAL_DIRECTIONS:
         raise RiskManagerError("signal.side must be BUY or SELL.")
 
     return _NormalizedSignal(
@@ -286,11 +289,11 @@ def _validate_product_quote(product: ExecutionProduct, *, max_age_seconds: float
 
 
 def _execution_side_for_signal(side: SignalSide) -> ExecutionSide:
-    return "long" if side == "BUY" else "short"
+    return EXECUTION_SIDE_LONG if side == SIGNAL_DIRECTION_BUY else EXECUTION_SIDE_SHORT
 
 
 def _order_action_for_signal(side: SignalSide) -> OrderAction:
-    return "BUY"
+    return BROKER_ACTION_BUY
 
 
 def _count_active_position_slots(account_snapshot: Any, product: ExecutionProduct) -> int:

@@ -1,0 +1,34 @@
+"""Candle data schema constants."""
+
+from __future__ import annotations
+
+
+CANDLE_TIMESTAMP = "timestamp"
+CANDLE_OPEN = "open"
+CANDLE_HIGH = "high"
+CANDLE_LOW = "low"
+CANDLE_CLOSE = "close"
+CANDLE_VOLUME = "volume"
+CANDLE_AVERAGE = "average"
+CANDLE_BAR_COUNT = "bar_count"
+
+REQUIRED_CANDLE_COLUMNS = (
+    CANDLE_TIMESTAMP,
+    CANDLE_OPEN,
+    CANDLE_HIGH,
+    CANDLE_LOW,
+    CANDLE_CLOSE,
+    CANDLE_VOLUME,
+    CANDLE_AVERAGE,
+    CANDLE_BAR_COUNT,
+)
+
+NUMERIC_CANDLE_COLUMNS = (
+    CANDLE_OPEN,
+    CANDLE_HIGH,
+    CANDLE_LOW,
+    CANDLE_CLOSE,
+    CANDLE_VOLUME,
+    CANDLE_AVERAGE,
+    CANDLE_BAR_COUNT,
+)

@@ -8,9 +8,12 @@ from typing import Literal
 
 import pandas as pd
 
+from data.schema import CANDLE_CLOSE, CANDLE_TIMESTAMP
+from domain.constants import SIGNAL_DIRECTION_BUY, SIGNAL_DIRECTION_SELL
+from ib_gateway.constants import SIGNAL_SYMBOL_XAUUSD
 
 SignalSide = Literal["BUY", "SELL"]
-REQUIRED_COLUMNS = ("timestamp", "close", "bias", "confidence")
+REQUIRED_COLUMNS = (CANDLE_TIMESTAMP, CANDLE_CLOSE, "bias", "confidence")
 
 
 class SignalEngineError(ValueError):
@@ -52,7 +55,7 @@ def generate_signal(
     bias_threshold: float,
     last_signal_id: str | None = None,
     *,
-    underlying_symbol: str = "XAUUSD",
+    underlying_symbol: str = SIGNAL_SYMBOL_XAUUSD,
     atr_length: int = 14,
     sl_atr_mult: float = 1.0,
     tp_atr_mult: float = 2.0,
@@ -76,9 +79,9 @@ def generate_signal(
 
     current_index = clean.index[-1]
     if bool(buy_signals.loc[current_index]):
-        side: SignalSide = "BUY"
+        side: SignalSide = SIGNAL_DIRECTION_BUY
     elif bool(sell_signals.loc[current_index]):
-        side = "SELL"
+        side = SIGNAL_DIRECTION_SELL
     else:
         return None
 
@@ -108,15 +111,15 @@ def _prepare_biased_data(biased_data: pd.DataFrame, atr_column: str) -> pd.DataF
         raise SignalEngineError(f"Biased DataFrame is missing required columns: {missing}.")
 
     result = biased_data.loc[:, required_columns].copy()
-    result["timestamp"] = result["timestamp"].map(_normalize_timestamp)
-    if result["timestamp"].isna().any():
+    result[CANDLE_TIMESTAMP] = result[CANDLE_TIMESTAMP].map(_normalize_timestamp)
+    if result[CANDLE_TIMESTAMP].isna().any():
         raise SignalEngineError("Biased DataFrame contains missing or invalid timestamps.")
 
-    for column in ("close", "bias", "confidence", atr_column):
+    for column in (CANDLE_CLOSE, "bias", "confidence", atr_column):
         result[column] = pd.to_numeric(result[column], errors="raise")
 
-    result = result.drop_duplicates(subset=["timestamp"], keep="last")
-    result = result.sort_values("timestamp").reset_index(drop=True)
+    result = result.drop_duplicates(subset=[CANDLE_TIMESTAMP], keep="last")
+    result = result.sort_values(CANDLE_TIMESTAMP).reset_index(drop=True)
     return result
 
 
@@ -140,8 +143,8 @@ def _build_signal(
     sl_atr_mult: float,
     tp_atr_mult: float,
 ) -> Signal:
-    timestamp = row["timestamp"]
-    price = row["close"]
+    timestamp = row[CANDLE_TIMESTAMP]
+    price = row[CANDLE_CLOSE]
     bias = row["bias"]
     confidence = row["confidence"]
     atr = row[atr_column]
@@ -157,7 +160,7 @@ def _build_signal(
     sl_distance = atr_value * sl_atr_mult
     tp_distance = atr_value * tp_atr_mult
 
-    if side == "BUY":
+    if side == SIGNAL_DIRECTION_BUY:
         underlying_sl_price = entry_price - sl_distance
         underlying_tp_price = entry_price + tp_distance
     else:

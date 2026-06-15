@@ -6,12 +6,21 @@ import argparse
 import asyncio
 from contextlib import suppress
 from dataclasses import asdict
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 from config.settings import AppSettings, load_settings
 from data.candle_store import CandleStore
 from data.market_data import MarketDataClient
+from domain.constants import (
+    ALERT_ONLY_MODE,
+    EXECUTION_SIDE_LONG,
+    EXECUTION_SIDE_SHORT,
+    LIVE_MODE,
+    PAPER_MODE,
+    PROTECTED_TRADING_MODES,
+)
 from execution.order_manager import OrderManager
 from execution.product_selector import ProductSelectionError, ProductSelector
 from ib_gateway.account import AccountReader
@@ -31,11 +40,6 @@ from strategy.bias_model import calculate_bias
 from strategy.indicators import add_indicators
 from strategy.signals import Signal, generate_signal
 from trade_journal.journal import TradeJournal
-
-
-ALERT_ONLY_MODE = "alert_only"
-PAPER_MODE = "paper"
-LIVE_MODE = "live"
 
 
 class BotRunnerError(RuntimeError):
@@ -66,8 +70,15 @@ class BotRunner:
         self.logger = setup_logging(self.settings)
         self.notifier = TelegramNotifier(self.settings, logger=get_logger("notifications.telegram"))
         self.state_store = StateStore(self.settings.paths.state_file)
-        self.journal = TradeJournal()
-        self.health_monitor = HealthMonitor(notifier=self.notifier)
+        self.journal = TradeJournal(journal_file=self.settings.paths.trade_journal_file)
+        self.health_monitor = HealthMonitor(
+            market_data_max_age=timedelta(seconds=self.settings.health.market_data_max_age_seconds),
+            last_processed_candle_max_age=timedelta(
+                seconds=self.settings.health.last_processed_candle_max_age_seconds
+            ),
+            repeated_error_limit=self.settings.health.repeated_error_limit,
+            notifier=self.notifier,
+        )
         self.emergency_stop = EmergencyStop(self.state_store, notifier=self.notifier, journal=self.journal)
         self.ib_connection = IBConnection(self.settings)
 
@@ -139,8 +150,11 @@ class BotRunner:
         return asyncio.create_task(monitor.run_forever(), name="active-trade-monitor")
 
     async def _run_cycle(self, *, ib: Any, signal_contract: Any, state: BotState) -> BotState:
-        candles = await MarketDataClient(ib).fetch_historical_bars(signal_contract)
-        candle_store = CandleStore(latest_processed_candle_ts=state.last_processed_candle_ts)
+        candles = await MarketDataClient(ib, settings=self.settings.market_data).fetch_historical_bars(signal_contract)
+        candle_store = CandleStore(
+            latest_processed_candle_ts=state.last_processed_candle_ts,
+            bar_size=self.settings.market_data.bar_size,
+        )
         update = candle_store.update(candles)
 
         self.logger.info(
@@ -281,8 +295,12 @@ class BotRunner:
         return updated_state
 
     async def _run_live_preflight_and_stop(self, *, ib: Any, signal_contract: Any, state: BotState) -> None:
-        candles = await MarketDataClient(ib).fetch_historical_bars(signal_contract)
-        candle_store = CandleStore(candles, latest_processed_candle_ts=state.last_processed_candle_ts)
+        candles = await MarketDataClient(ib, settings=self.settings.market_data).fetch_historical_bars(signal_contract)
+        candle_store = CandleStore(
+            candles,
+            latest_processed_candle_ts=state.last_processed_candle_ts,
+            bar_size=self.settings.market_data.bar_size,
+        )
         account_snapshot = await AccountReader(ib, client_id=self.settings.ib.client_id).read_snapshot()
         health_report = self._run_health_checks(
             ib=ib,
@@ -298,7 +316,7 @@ class BotRunner:
         raise LiveModeGateError("Live mode readiness checks passed, but live execution is not enabled in this task.")
 
     async def _run_account_guard(self, *, ib: Any, state: BotState) -> None:
-        if self.settings.trading.mode not in {PAPER_MODE, LIVE_MODE}:
+        if self.settings.trading.mode not in PROTECTED_TRADING_MODES:
             return
 
         if self.settings.ib.client_id != 0:
@@ -376,10 +394,10 @@ def _validate_mode_startup(settings: AppSettings) -> None:
 
 def _validate_paper_execution_config(settings: AppSettings) -> None:
     if settings.trading.allowed_directions.long:
-        _validate_configured_execution_products(settings, "long")
+        _validate_configured_execution_products(settings, EXECUTION_SIDE_LONG)
 
     if settings.trading.allowed_directions.short:
-        _validate_configured_execution_products(settings, "short")
+        _validate_configured_execution_products(settings, EXECUTION_SIDE_SHORT)
 
 
 def _validate_configured_execution_products(settings: AppSettings, side: str) -> None:

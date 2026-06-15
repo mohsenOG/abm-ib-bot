@@ -7,6 +7,14 @@ from typing import Any
 
 from ib_async import Commodity, Contract
 
+from ib_gateway.constants import (
+    EUR_CURRENCY,
+    EXECUTION_SEC_TYPE_IOPT,
+    SIGNAL_ASSET_CLASS_CMDTY,
+    SIGNAL_SYMBOL_XAUUSD,
+    SMART_EXCHANGE,
+    USD_CURRENCY,
+)
 from logging_setup.logger import get_logger
 
 
@@ -51,7 +59,7 @@ def build_signal_contract(settings: Any) -> Contract:
     config = _load_signal_contract_config(settings)
     _validate_signal_contract_config(config)
 
-    if config.asset_class == "CMDTY":
+    if config.asset_class == SIGNAL_ASSET_CLASS_CMDTY:
         return Commodity(
             symbol=config.symbol,
             exchange=config.exchange,
@@ -144,25 +152,25 @@ def _load_execution_contract_config(product: Any) -> ExecutionContractConfig:
 
 
 def _validate_signal_contract_config(config: SignalContractConfig) -> None:
-    if config.asset_class != "CMDTY":
-        raise ContractBuildError("signal_instrument.asset_class must be CMDTY.")
+    if config.asset_class != SIGNAL_ASSET_CLASS_CMDTY:
+        raise ContractBuildError(f"signal_instrument.asset_class must be {SIGNAL_ASSET_CLASS_CMDTY}.")
 
-    if config.symbol != "XAUUSD":
-        raise ContractBuildError("signal_instrument.symbol must be XAUUSD for this gold bot.")
+    if config.symbol != SIGNAL_SYMBOL_XAUUSD:
+        raise ContractBuildError(f"signal_instrument.symbol must be {SIGNAL_SYMBOL_XAUUSD} for this gold bot.")
 
-    if config.exchange != "SMART":
-        raise ContractBuildError("signal_instrument.exchange must be SMART for XAUUSD.")
+    if config.exchange != SMART_EXCHANGE:
+        raise ContractBuildError(f"signal_instrument.exchange must be {SMART_EXCHANGE} for XAUUSD.")
 
-    if config.currency != "USD":
-        raise ContractBuildError("signal_instrument.currency must be USD.")
+    if config.currency != USD_CURRENCY:
+        raise ContractBuildError(f"signal_instrument.currency must be {USD_CURRENCY}.")
 
     if config.expiry is not None:
         raise ContractBuildError("signal_instrument.expiry must be empty for CMDTY XAUUSD.")
 
 
 def _validate_execution_contract_config(config: ExecutionContractConfig) -> None:
-    if config.asset_class != "IOPT":
-        raise ContractBuildError("Execution product asset_class must be IOPT.")
+    if config.asset_class != EXECUTION_SEC_TYPE_IOPT:
+        raise ContractBuildError(f"Execution product asset_class must be {EXECUTION_SEC_TYPE_IOPT}.")
 
     if config.con_id <= 0:
         raise ContractBuildError("Execution product con_id must be greater than zero.")
@@ -170,8 +178,8 @@ def _validate_execution_contract_config(config: ExecutionContractConfig) -> None
     if not config.exchange:
         raise ContractBuildError("Execution product exchange is required before execution use.")
 
-    if config.currency != "EUR":
-        raise ContractBuildError("Execution product currency must be EUR.")
+    if config.currency != EUR_CURRENCY:
+        raise ContractBuildError(f"Execution product currency must be {EUR_CURRENCY}.")
 
 
 def _require_connected(ib: Any) -> None:

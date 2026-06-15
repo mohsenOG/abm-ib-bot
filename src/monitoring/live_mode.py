@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from domain.constants import LIVE_MODE
 from logging_setup.logger import get_logger
 from monitoring.account_guard import account_guard_failures, configured_account_id, snapshot_accounts
 from monitoring.health import HealthReport
@@ -77,7 +78,7 @@ class LiveModeGate:
         return account_guard_failures(
             expected_account=configured_account_id(self._settings),
             observed_accounts=snapshot_accounts(account_snapshot),
-            mode="live",
+            mode=LIVE_MODE,
         )
 
     def _reconciliation_failures(self, account_snapshot: Any, state: BotState) -> list[str]:

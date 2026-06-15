@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from domain.constants import LIVE_MODE, PAPER_MODE, PROTECTED_TRADING_MODES
 
-PROTECTED_TRADING_MODES = {"paper", "live"}
 PAPER_ACCOUNT_PREFIX = "DU"
 
 
@@ -71,10 +71,10 @@ def account_guard_failures(
         failures.append(f"IB_ACCOUNT_ID is required when trading.mode is {mode}")
         return failures
 
-    if mode == "paper" and not is_paper_account_id(expected_account):
+    if mode == PAPER_MODE and not is_paper_account_id(expected_account):
         failures.append("IB_ACCOUNT_ID must be an IBKR paper account id starting with DU when trading.mode is paper")
 
-    if mode == "live" and is_paper_account_id(expected_account):
+    if mode == LIVE_MODE and is_paper_account_id(expected_account):
         failures.append("IB_ACCOUNT_ID must be a live IBKR account id when trading.mode is live")
 
     if not observed_accounts:

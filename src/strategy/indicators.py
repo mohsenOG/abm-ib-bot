@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pandas as pd
 
+from data.schema import CANDLE_CLOSE, CANDLE_HIGH, CANDLE_LOW, CANDLE_OPEN
 
-REQUIRED_PRICE_COLUMNS = ("open", "high", "low", "close")
+REQUIRED_PRICE_COLUMNS = (CANDLE_OPEN, CANDLE_HIGH, CANDLE_LOW, CANDLE_CLOSE)
 
 EMA_PERIODS = (5, 10, 20, 50, 100, 200)
 SMA_PERIODS = (5, 10, 20, 50)
@@ -235,7 +236,7 @@ def _prepare_candles(candles: pd.DataFrame) -> pd.DataFrame:
 def _add_heikin_ashi_columns(candles: pd.DataFrame) -> pd.DataFrame:
     result = candles.copy()
     result["ha_close"] = (
-        result["open"] + result["high"] + result["low"] + result["close"]
+        result[CANDLE_OPEN] + result[CANDLE_HIGH] + result[CANDLE_LOW] + result[CANDLE_CLOSE]
     ) / 4
 
     ha_open_values: list[float] = []
@@ -249,8 +250,8 @@ def _add_heikin_ashi_columns(candles: pd.DataFrame) -> pd.DataFrame:
         ha_open_values.append((previous_ha_open + previous_ha_close) / 2)
 
     result["ha_open"] = pd.Series(ha_open_values, index=result.index, dtype="float64")
-    result["ha_high"] = result.loc[:, ("high", "ha_open", "ha_close")].max(axis=1)
-    result["ha_low"] = result.loc[:, ("low", "ha_open", "ha_close")].min(axis=1)
+    result["ha_high"] = result.loc[:, (CANDLE_HIGH, "ha_open", "ha_close")].max(axis=1)
+    result["ha_low"] = result.loc[:, (CANDLE_LOW, "ha_open", "ha_close")].min(axis=1)
     return result
 
 
@@ -262,10 +263,10 @@ def _add_source_columns(candles: pd.DataFrame, use_heikin_ashi: bool) -> pd.Data
         result["src_low"] = result["ha_low"]
         result["src_close"] = result["ha_close"]
     else:
-        result["src_open"] = result["open"]
-        result["src_high"] = result["high"]
-        result["src_low"] = result["low"]
-        result["src_close"] = result["close"]
+        result["src_open"] = result[CANDLE_OPEN]
+        result["src_high"] = result[CANDLE_HIGH]
+        result["src_low"] = result[CANDLE_LOW]
+        result["src_close"] = result[CANDLE_CLOSE]
 
     return result
 

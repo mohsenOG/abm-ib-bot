@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR, InvalidOperation
+from typing import Any
 
 
 class RiskSizingError(ValueError):
@@ -15,6 +16,16 @@ class QuantityRules:
     min_quantity: Decimal = Decimal("1")
     quantity_step: Decimal = Decimal("1")
     allow_fractional: bool = False
+
+
+def quantity_rules_from_settings(settings: Any) -> QuantityRules:
+    """Build exact quantity rules from loaded sizing settings."""
+
+    return QuantityRules(
+        min_quantity=_positive_decimal(getattr(settings, "min_quantity", None), "sizing.min_quantity"),
+        quantity_step=_positive_decimal(getattr(settings, "quantity_step", None), "sizing.quantity_step"),
+        allow_fractional=_bool_setting(getattr(settings, "allow_fractional", None), "sizing.allow_fractional"),
+    )
 
 
 def calculate_capital_per_position(initial_capital: float, capital_slots: int) -> float:
@@ -106,3 +117,9 @@ def _positive_decimal(value: object, field_name: str) -> Decimal:
         raise RiskSizingError(f"{field_name} must be greater than zero.")
 
     return result
+
+
+def _bool_setting(value: object, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise RiskSizingError(f"{field_name} must be true or false.")
+    return value

@@ -80,6 +80,8 @@ gold\_ib\_bot/
 
 │   ├── strategy/
 
+│   ├── domain/
+
 │   ├── risk/
 
 │   ├── execution/
@@ -1749,6 +1751,8 @@ ib\_gateway          IB connection, contracts, account only
 data                candle fetching and candle storage only
 
 strategy            indicators, bias, and signals only
+
+domain              shared trading constants only
 
 risk                trade approval and sizing only
 

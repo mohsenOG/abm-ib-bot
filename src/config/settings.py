@@ -5,12 +5,20 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from domain.constants import EXECUTION_SIDE_LONG, EXECUTION_SIDE_SHORT, TRADING_MODES
+from ib_gateway.constants import (
+    EUR_CURRENCY,
+    EXECUTION_SEC_TYPE_IOPT,
+    SIGNAL_ASSET_CLASS_CMDTY,
+    USD_CURRENCY,
+)
 
-ALLOWED_TRADING_MODES = {"alert_only", "paper", "live"}
-REQUIRED_TIMEFRAME = "1 hour"
+SUPPORTED_MARKET_DATA_BAR_SIZE = "1 hour"
+SUPPORTED_ENTRY_ORDER_TYPES = {"market"}
 
 
 class SettingsValidationError(ValueError):
@@ -26,8 +34,16 @@ class AllowedDirectionsSettings:
 @dataclass(frozen=True)
 class TradingSettings:
     mode: str
-    timeframe: str
     allowed_directions: AllowedDirectionsSettings
+
+
+@dataclass(frozen=True)
+class MarketDataSettings:
+    bar_size: str
+    historical_duration: str
+    what_to_show: str
+    use_rth: bool
+    candle_close_buffer_seconds: float
 
 
 @dataclass(frozen=True)
@@ -58,6 +74,16 @@ class InstrumentSettings:
 
 
 @dataclass(frozen=True)
+class ExecutionSettings:
+    products_file: Path
+    entry_order_type: str
+    entry_fill_timeout_seconds: float
+    protective_submit_timeout_seconds: float
+    status_poll_seconds: float
+    quote_poll_seconds: float
+
+
+@dataclass(frozen=True)
 class ExecutionProductSettings:
     side: str
     sec_type: str
@@ -79,6 +105,13 @@ class ExecutionProductsSettings:
 
 
 @dataclass(frozen=True)
+class SizingSettings:
+    min_quantity: Decimal
+    quantity_step: Decimal
+    allow_fractional: bool
+
+
+@dataclass(frozen=True)
 class RiskSettings:
     initial_capital: float
     capital_slots: int
@@ -88,11 +121,19 @@ class RiskSettings:
 
 @dataclass(frozen=True)
 class StrategySettings:
+    model_version: str
     bias_threshold: float
     use_heikin_ashi: bool
     atr_length: int
     sl_atr_mult: float
     tp_atr_mult: float
+
+
+@dataclass(frozen=True)
+class HealthSettings:
+    market_data_max_age_seconds: float
+    last_processed_candle_max_age_seconds: float
+    repeated_error_limit: int
 
 
 @dataclass(frozen=True)
@@ -125,13 +166,17 @@ class PathSettings:
 class AppSettings:
     project_root: Path
     trading: TradingSettings
+    market_data: MarketDataSettings
     ib: IBSettings
     telegram: TelegramSettings
     signal_instrument: InstrumentSettings
     instrument: InstrumentSettings
+    execution: ExecutionSettings
     execution_products: ExecutionProductsSettings
+    sizing: SizingSettings
     risk: RiskSettings
     strategy: StrategySettings
+    health: HealthSettings
     runtime: RuntimeSettings
     live: LiveModeSettings
     logger: LoggerSettings
@@ -155,17 +200,22 @@ def load_settings(
 
     raw = _load_yaml(settings_path)
     signal_instrument = _load_signal_instrument(raw)
+    execution = _load_execution(raw, project_root)
 
     return AppSettings(
         project_root=project_root,
         trading=_load_trading(raw),
+        market_data=_load_market_data(raw),
         ib=_load_ib(raw),
         telegram=_load_telegram(raw),
         signal_instrument=signal_instrument,
         instrument=signal_instrument,
-        execution_products=_load_execution_products(project_root),
+        execution=execution,
+        execution_products=_load_execution_products(execution.products_file),
+        sizing=_load_sizing(raw),
         risk=_load_risk(raw),
         strategy=_load_strategy(raw),
+        health=_load_health(raw),
         runtime=_load_runtime(raw),
         live=_load_live(raw),
         logger=_load_logger(raw, project_root),
@@ -213,17 +263,42 @@ def _load_json(json_path: Path) -> dict[str, Any]:
 def _load_trading(raw: dict[str, Any]) -> TradingSettings:
     section = _required_section(raw, "trading")
     mode = _required_string(section, "mode", "trading.mode")
-    timeframe = _required_string(section, "timeframe", "trading.timeframe")
     allowed_directions = _load_allowed_directions(section)
 
-    if mode not in ALLOWED_TRADING_MODES:
-        allowed = ", ".join(sorted(ALLOWED_TRADING_MODES))
+    if mode not in TRADING_MODES:
+        allowed = ", ".join(sorted(TRADING_MODES))
         raise SettingsValidationError(f"trading.mode must be one of: {allowed}.")
 
-    if timeframe != REQUIRED_TIMEFRAME:
-        raise SettingsValidationError(f"trading.timeframe must be exactly '{REQUIRED_TIMEFRAME}'.")
+    return TradingSettings(mode=mode, allowed_directions=allowed_directions)
 
-    return TradingSettings(mode=mode, timeframe=timeframe, allowed_directions=allowed_directions)
+
+def _load_market_data(raw: dict[str, Any]) -> MarketDataSettings:
+    section = _required_section(raw, "market_data")
+    bar_size = _required_string(section, "bar_size", "market_data.bar_size")
+    historical_duration = _required_string(section, "historical_duration", "market_data.historical_duration")
+    what_to_show = _required_string(section, "what_to_show", "market_data.what_to_show")
+    use_rth = _required_bool(section, "use_rth", "market_data.use_rth")
+    candle_close_buffer_seconds = _required_float(
+        section,
+        "candle_close_buffer_seconds",
+        "market_data.candle_close_buffer_seconds",
+    )
+
+    if bar_size != SUPPORTED_MARKET_DATA_BAR_SIZE:
+        raise SettingsValidationError(
+            f"market_data.bar_size must be exactly '{SUPPORTED_MARKET_DATA_BAR_SIZE}' for this strategy model."
+        )
+
+    if candle_close_buffer_seconds < 0:
+        raise SettingsValidationError("market_data.candle_close_buffer_seconds must be zero or greater.")
+
+    return MarketDataSettings(
+        bar_size=bar_size,
+        historical_duration=historical_duration,
+        what_to_show=what_to_show,
+        use_rth=use_rth,
+        candle_close_buffer_seconds=candle_close_buffer_seconds,
+    )
 
 
 def _load_allowed_directions(section: dict[str, Any]) -> AllowedDirectionsSettings:
@@ -316,11 +391,13 @@ def _load_signal_instrument(raw: dict[str, Any]) -> InstrumentSettings:
     currency = currency.upper()
     exchange = exchange.upper()
 
-    if currency != "USD":
-        raise SettingsValidationError("signal_instrument.currency must be USD for this gold bot.")
+    if currency != USD_CURRENCY:
+        raise SettingsValidationError(f"signal_instrument.currency must be {USD_CURRENCY} for this gold bot.")
 
-    if asset_class != "CMDTY":
-        raise SettingsValidationError("signal_instrument.asset_class must be CMDTY for XAUUSD signals.")
+    if asset_class != SIGNAL_ASSET_CLASS_CMDTY:
+        raise SettingsValidationError(
+            f"signal_instrument.asset_class must be {SIGNAL_ASSET_CLASS_CMDTY} for XAUUSD signals."
+        )
 
     return InstrumentSettings(
         asset_class=asset_class,
@@ -331,8 +408,55 @@ def _load_signal_instrument(raw: dict[str, Any]) -> InstrumentSettings:
     )
 
 
-def _load_execution_products(project_root: Path) -> ExecutionProductsSettings:
-    raw = _load_json(project_root / "execution_products.json")
+def _load_execution(raw: dict[str, Any], project_root: Path) -> ExecutionSettings:
+    section = _required_section(raw, "execution")
+    products_file = _resolve_project_path(
+        project_root,
+        _required_string(section, "products_file", "execution.products_file"),
+    )
+    entry_order_type = _required_string(section, "entry_order_type", "execution.entry_order_type").lower()
+    entry_fill_timeout_seconds = _required_float(
+        section,
+        "entry_fill_timeout_seconds",
+        "execution.entry_fill_timeout_seconds",
+    )
+    protective_submit_timeout_seconds = _required_float(
+        section,
+        "protective_submit_timeout_seconds",
+        "execution.protective_submit_timeout_seconds",
+    )
+    status_poll_seconds = _required_float(section, "status_poll_seconds", "execution.status_poll_seconds")
+    quote_poll_seconds = _required_float(section, "quote_poll_seconds", "execution.quote_poll_seconds")
+
+    if entry_order_type not in SUPPORTED_ENTRY_ORDER_TYPES:
+        allowed = ", ".join(sorted(SUPPORTED_ENTRY_ORDER_TYPES))
+        raise SettingsValidationError(
+            f"execution.entry_order_type must be one of: {allowed}. Limit entries are not supported yet."
+        )
+
+    if entry_fill_timeout_seconds <= 0:
+        raise SettingsValidationError("execution.entry_fill_timeout_seconds must be greater than zero.")
+    if protective_submit_timeout_seconds <= 0:
+        raise SettingsValidationError("execution.protective_submit_timeout_seconds must be greater than zero.")
+    if status_poll_seconds <= 0:
+        raise SettingsValidationError("execution.status_poll_seconds must be greater than zero.")
+    if quote_poll_seconds <= 0:
+        raise SettingsValidationError("execution.quote_poll_seconds must be greater than zero.")
+
+    # Relative execution product paths are resolved against the project root,
+    # matching the rest of the app's path settings and the repository layout.
+    return ExecutionSettings(
+        products_file=products_file,
+        entry_order_type=entry_order_type,
+        entry_fill_timeout_seconds=entry_fill_timeout_seconds,
+        protective_submit_timeout_seconds=protective_submit_timeout_seconds,
+        status_poll_seconds=status_poll_seconds,
+        quote_poll_seconds=quote_poll_seconds,
+    )
+
+
+def _load_execution_products(json_path: Path) -> ExecutionProductsSettings:
+    raw = _load_json(json_path)
     section = _required_section(raw, "execution_products")
     quote_max_age_seconds = _required_float(
         section,
@@ -357,8 +481,8 @@ def _load_execution_products(project_root: Path) -> ExecutionProductsSettings:
         quote_max_age_seconds=quote_max_age_seconds,
         max_spread_pct=max_spread_pct,
         max_order_value_eur=max_order_value_eur,
-        long=_load_execution_product_side(section, "long"),
-        short=_load_execution_product_side(section, "short"),
+        long=_load_execution_product_side(section, EXECUTION_SIDE_LONG),
+        short=_load_execution_product_side(section, EXECUTION_SIDE_SHORT),
     )
 
 
@@ -390,12 +514,12 @@ def _load_execution_product(
     enabled = _required_bool(product, "enabled", f"{prefix}.enabled")
     issuer_fee_pct = _required_float(product, "issuer_fee_pct", f"{prefix}.issuer_fee_pct")
 
-    if sec_type != "IOPT":
-        raise SettingsValidationError(f"{prefix}.secType must be IOPT.")
+    if sec_type != EXECUTION_SEC_TYPE_IOPT:
+        raise SettingsValidationError(f"{prefix}.secType must be {EXECUTION_SEC_TYPE_IOPT}.")
     if con_id <= 0:
         raise SettingsValidationError(f"{prefix}.conId must be greater than zero.")
-    if currency != "EUR":
-        raise SettingsValidationError(f"{prefix}.currency must be EUR.")
+    if currency != EUR_CURRENCY:
+        raise SettingsValidationError(f"{prefix}.currency must be {EUR_CURRENCY}.")
     if leverage <= 0:
         raise SettingsValidationError(f"{prefix}.leverage must be greater than zero.")
     if issuer_fee_pct < 0:
@@ -410,6 +534,24 @@ def _load_execution_product(
         leverage=leverage,
         enabled=enabled,
         issuer_fee_pct=issuer_fee_pct,
+    )
+
+
+def _load_sizing(raw: dict[str, Any]) -> SizingSettings:
+    section = _required_section(raw, "sizing")
+    min_quantity = _required_decimal(section, "min_quantity", "sizing.min_quantity")
+    quantity_step = _required_decimal(section, "quantity_step", "sizing.quantity_step")
+    allow_fractional = _required_bool(section, "allow_fractional", "sizing.allow_fractional")
+
+    if min_quantity <= 0:
+        raise SettingsValidationError("sizing.min_quantity must be greater than zero.")
+    if quantity_step <= 0:
+        raise SettingsValidationError("sizing.quantity_step must be greater than zero.")
+
+    return SizingSettings(
+        min_quantity=min_quantity,
+        quantity_step=quantity_step,
+        allow_fractional=allow_fractional,
     )
 
 
@@ -447,6 +589,7 @@ def _load_risk(raw: dict[str, Any]) -> RiskSettings:
 
 def _load_strategy(raw: dict[str, Any]) -> StrategySettings:
     section = _required_section(raw, "strategy")
+    model_version = _required_string(section, "model_version", "strategy.model_version")
     bias_threshold = _required_float(section, "bias_threshold", "strategy.bias_threshold")
     use_heikin_ashi = _optional_bool(section, "use_heikin_ashi", "strategy.use_heikin_ashi", False)
     atr_length = _required_int(section, "atr_length", "strategy.atr_length")
@@ -466,11 +609,40 @@ def _load_strategy(raw: dict[str, Any]) -> StrategySettings:
         raise SettingsValidationError("strategy.tp_atr_mult must be greater than zero.")
 
     return StrategySettings(
+        model_version=model_version,
         bias_threshold=bias_threshold,
         use_heikin_ashi=use_heikin_ashi,
         atr_length=atr_length,
         sl_atr_mult=sl_atr_mult,
         tp_atr_mult=tp_atr_mult,
+    )
+
+
+def _load_health(raw: dict[str, Any]) -> HealthSettings:
+    section = _required_section(raw, "health")
+    market_data_max_age_seconds = _required_float(
+        section,
+        "market_data_max_age_seconds",
+        "health.market_data_max_age_seconds",
+    )
+    last_processed_candle_max_age_seconds = _required_float(
+        section,
+        "last_processed_candle_max_age_seconds",
+        "health.last_processed_candle_max_age_seconds",
+    )
+    repeated_error_limit = _required_int(section, "repeated_error_limit", "health.repeated_error_limit")
+
+    if market_data_max_age_seconds <= 0:
+        raise SettingsValidationError("health.market_data_max_age_seconds must be greater than zero.")
+    if last_processed_candle_max_age_seconds <= 0:
+        raise SettingsValidationError("health.last_processed_candle_max_age_seconds must be greater than zero.")
+    if repeated_error_limit <= 0:
+        raise SettingsValidationError("health.repeated_error_limit must be greater than zero.")
+
+    return HealthSettings(
+        market_data_max_age_seconds=market_data_max_age_seconds,
+        last_processed_candle_max_age_seconds=last_processed_candle_max_age_seconds,
+        repeated_error_limit=repeated_error_limit,
     )
 
 
@@ -607,6 +779,19 @@ def _required_float(section: dict[str, Any], key: str, field_name: str) -> float
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise SettingsValidationError(f"{field_name} must be a number.")
     return float(value)
+
+
+def _required_decimal(section: dict[str, Any], key: str, field_name: str) -> Decimal:
+    value = section.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise SettingsValidationError(f"{field_name} must be a number.")
+
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise SettingsValidationError(f"{field_name} must be a number.") from exc
+
+    return result
 
 
 def _optional_float(section: dict[str, Any], key: str, field_name: str, default: float) -> float:
