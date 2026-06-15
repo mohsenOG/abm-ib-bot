@@ -136,6 +136,51 @@ class OrderBuilder:
         take_profit_order.transmit = True
         return stop_loss_order, take_profit_order
 
+    def build_attached_exit_orders(
+        self,
+        trade_plan: Any,
+        *,
+        quantity: float,
+        stop_loss_price: float,
+        take_profit_price: float,
+        parent_order_id: int,
+        oca_group: str,
+    ) -> tuple[Order, Order]:
+        """Build attached SL/TP child orders for a broker-side bracket."""
+
+        action = _order_action(trade_plan)
+        exit_quantity = _positive_float(quantity, "quantity")
+        signal_id = _optional_text(getattr(trade_plan, "signal_id", None), "signal_id")
+        group = _optional_text(oca_group, "oca_group")
+
+        stop_loss_order, take_profit_order = self._build_protective_orders(
+            action=action,
+            quantity=exit_quantity,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            parent_order_id=parent_order_id,
+            order_ref=signal_id,
+        )
+        if stop_loss_order is None or take_profit_order is None:
+            raise OrderBuilderError("Both stop-loss and take-profit orders are required for a bracket.")
+
+        for order in (stop_loss_order, take_profit_order):
+            order.ocaGroup = group
+            order.ocaType = 1
+
+        stop_loss_order.transmit = False
+        take_profit_order.transmit = True
+        return stop_loss_order, take_profit_order
+
+    def build_market_exit_order(self, trade_plan: Any, *, quantity: float) -> Order:
+        """Build a defensive market exit order for an existing position."""
+
+        action = _opposite_action(_order_action(trade_plan))
+        exit_order = MarketOrder(action, _positive_float(quantity, "quantity"))
+        signal_id = _optional_text(getattr(trade_plan, "signal_id", None), "signal_id")
+        _apply_common_fields(exit_order, account_id=self._account_id, order_ref=signal_id)
+        return exit_order
+
     def _build_entry_order(
         self,
         *,

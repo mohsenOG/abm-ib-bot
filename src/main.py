@@ -287,6 +287,7 @@ class BotRunner:
             state_store=self.state_store,
             journal=self.journal,
             notifier=self.notifier,
+            emergency_stop=self.emergency_stop,
         ).submit_trade_plan(contract=execution_contract, trade_plan=trade_plan, state=state)
 
         updated_state = result.state if result.state is not None else state

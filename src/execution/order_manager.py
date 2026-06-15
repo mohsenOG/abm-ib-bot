@@ -18,6 +18,7 @@ from domain.constants import (
     ORDER_STATUS_REJECTED,
     ORDER_STATUS_SUBMITTED,
     PAPER_MODE,
+    TRADE_STATUS_CLOSED,
     TERMINAL_ORDER_STATUSES,
 )
 from config.defaults import DEFAULT_EXECUTION_ENTRY_ORDER_TYPE
@@ -80,6 +81,7 @@ class OrderManager:
         state_store: StateStore | None = None,
         journal: TradeJournal | None = None,
         notifier: Any | None = None,
+        emergency_stop: Any | None = None,
         order_builder: OrderBuilder | None = None,
     ) -> None:
         self._settings = settings
@@ -87,6 +89,7 @@ class OrderManager:
         self._state_store = state_store
         self._journal = journal
         self._notifier = notifier
+        self._emergency_stop = emergency_stop
         self._builder = order_builder or OrderBuilder(account_id=getattr(getattr(settings, "ib", None), "account_id", None))
         execution_settings = getattr(settings, "execution", None)
         self._entry_order_type = _entry_order_type_setting(execution_settings)
@@ -140,12 +143,12 @@ class OrderManager:
         state: BotState | None = None,
         ib: Any | None = None,
     ) -> ManagedOrderResult:
-        """Submit an entry order and, after fill, broker-side OCA protection."""
+        """Submit a broker-side bracket order and verify attached protection."""
 
         self._require_paper_mode()
         if order_set.has_protective_orders:
             raise OrderManagerError(
-                "Prebuilt protective orders are not accepted; OrderManager builds post-fill OCA protection."
+                "Prebuilt protective orders are not accepted; OrderManager builds broker-side bracket protection."
             )
 
         active_ib = ib if ib is not None else self._connected_ib()
@@ -156,53 +159,113 @@ class OrderManager:
         self._guard_connected_account(active_ib)
         self._guard_order_accounts(order_set)
 
-        self._logger.info(
-            "Submitting paper order. signal_id=%s action=%s quantity=%s",
-            getattr(trade_plan, "signal_id", None),
-            getattr(order_set.entry_order, "action", ""),
-            getattr(order_set.entry_order, "totalQuantity", 0),
+        entry_order_id = self._ensure_order_id(active_ib, order_set.entry_order)
+        stop_price, take_profit_price = _protective_product_prices_from_trade_plan(trade_plan)
+        oca_group = _oca_group_name_from_order_id(entry_order_id)
+        stop_loss_order, take_profit_order = self._builder.build_attached_exit_orders(
+            trade_plan,
+            quantity=getattr(order_set.entry_order, "totalQuantity", 0),
+            stop_loss_price=stop_price,
+            take_profit_price=take_profit_price,
+            parent_order_id=entry_order_id,
+            oca_group=oca_group,
         )
+        bracket_order_set = BuiltOrderSet(
+            entry_order=order_set.entry_order,
+            stop_loss_order=stop_loss_order,
+            take_profit_order=take_profit_order,
+        )
+        bracket_order_set.entry_order.transmit = False
+        self._guard_order_accounts(bracket_order_set)
+
+        self._logger.info(
+            "Submitting broker-side paper bracket. signal_id=%s action=%s quantity=%s entry_order_id=%s stop=%s take_profit=%s",
+            getattr(trade_plan, "signal_id", None),
+            getattr(bracket_order_set.entry_order, "action", ""),
+            getattr(bracket_order_set.entry_order, "totalQuantity", 0),
+            entry_order_id,
+            stop_price,
+            take_profit_price,
+        )
+
+        trade = None
+        protective_trades: tuple[Any, ...] = ()
+        updated_state = current_state
+        try:
+            trade = active_ib.placeOrder(contract, bracket_order_set.entry_order)
+            self._attach_trade_event_handlers(trade, trade_plan, current_state)
+            await asyncio.sleep(0)
+
+            status = _managed_status(trade, trade_plan)
+            updated_state = self._process_status_update(
+                status,
+                trade_plan,
+                current_state,
+                source="submit",
+                force=True,
+            )
+
+            stop_trade = active_ib.placeOrder(contract, stop_loss_order)
+            take_profit_trade = active_ib.placeOrder(contract, take_profit_order)
+            protective_trades = (stop_trade, take_profit_trade)
+        except Exception as exc:
+            updated_state = await self._handle_bracket_failure(
+                active_ib,
+                contract=contract,
+                trade_plan=trade_plan,
+                entry_trade=trade,
+                protective_trades=protective_trades,
+                state=updated_state,
+                stop_price=stop_price,
+                take_profit_price=take_profit_price,
+                oca_group=oca_group,
+                cause=exc,
+            )
+            if isinstance(exc, OrderManagerError):
+                raise
+            raise OrderManagerError("Failed to submit broker-side bracket order set.") from exc
 
         try:
-            trade = active_ib.placeOrder(contract, order_set.entry_order)
+            filled_status = await self._wait_for_entry_fill(
+                active_ib,
+                trade,
+                trade_plan=trade_plan,
+                state=updated_state,
+                timeout_seconds=self._entry_fill_timeout_seconds,
+            )
+            updated_state = self._process_status_update(
+                filled_status,
+                trade_plan,
+                updated_state,
+                source="fill_wait",
+                force=True,
+            )
+
+            await self._wait_for_protective_submission(protective_trades, trade_plan)
+            updated_state = self._persist_protective_orders(
+                updated_state,
+                trade_plan=trade_plan,
+                protective_trades=protective_trades,
+                stop_price=stop_price,
+                take_profit_price=take_profit_price,
+                oca_group=oca_group,
+            )
         except Exception as exc:
-            self._logger.exception("Paper order submission failed.")
-            raise OrderManagerError("Failed to submit paper order to Interactive Brokers.") from exc
-
-        self._attach_trade_event_handlers(trade, trade_plan, current_state)
-        await asyncio.sleep(0)
-
-        status = _managed_status(trade, trade_plan)
-        updated_state = self._process_status_update(
-            status,
-            trade_plan,
-            current_state,
-            source="submit",
-            force=True,
-        )
-
-        filled_status = await self._wait_for_entry_fill(
-            active_ib,
-            trade,
-            trade_plan=trade_plan,
-            state=updated_state,
-            timeout_seconds=self._entry_fill_timeout_seconds,
-        )
-        updated_state = self._process_status_update(
-            filled_status,
-            trade_plan,
-            updated_state,
-            source="fill_wait",
-            force=True,
-        )
-
-        protective_trades, updated_state = await self._submit_protective_oca_orders(
-            active_ib,
-            contract=contract,
-            trade_plan=trade_plan,
-            entry_status=filled_status,
-            state=updated_state,
-        )
+            updated_state = await self._handle_bracket_failure(
+                active_ib,
+                contract=contract,
+                trade_plan=trade_plan,
+                entry_trade=trade,
+                protective_trades=protective_trades,
+                state=updated_state,
+                stop_price=stop_price,
+                take_profit_price=take_profit_price,
+                oca_group=oca_group,
+                cause=exc,
+            )
+            if isinstance(exc, OrderManagerError):
+                raise
+            raise OrderManagerError("Broker-side bracket protection could not be confirmed.") from exc
 
         self._logger.info(
             "Paper order protected. signal_id=%s entry_order_id=%s entry_perm_id=%s protective_orders=%s",
@@ -303,6 +366,275 @@ class OrderManager:
         )
         return protective_trades, updated_state
 
+    async def _handle_bracket_failure(
+        self,
+        ib: Any,
+        *,
+        contract: Any,
+        trade_plan: Any,
+        entry_trade: Any | None,
+        protective_trades: tuple[Any, ...],
+        state: BotState | None,
+        stop_price: float,
+        take_profit_price: float,
+        oca_group: str,
+        cause: Exception,
+    ) -> BotState | None:
+        if entry_trade is None:
+            self._logger.exception("Broker-side bracket submission failed before entry order was accepted.")
+            return state
+
+        entry_status = _managed_status(entry_trade, trade_plan)
+        updated_state = self._process_status_update(
+            entry_status,
+            trade_plan,
+            state,
+            source="bracket_failure",
+            force=True,
+        )
+
+        if entry_status.filled <= 0:
+            self._logger.exception("Broker-side bracket failed before any entry fill; cancelling staged orders.")
+            self._cancel_orders(ib, (entry_trade, *protective_trades))
+            return self._mark_cancelled_bracket_failure(
+                updated_state,
+                reason=f"Broker-side bracket failed before entry fill: {type(cause).__name__}: {cause}",
+            )
+
+        reason = (
+            "Entry exposure exists without confirmed broker-side SL/TP protection. "
+            f"cause={type(cause).__name__}: {cause}"
+        )
+        self._logger.critical(reason)
+        updated_state = self._mark_unprotected_entry(
+            updated_state,
+            trade_plan=trade_plan,
+            entry_status=entry_status,
+            stop_price=stop_price,
+            take_profit_price=take_profit_price,
+            oca_group=oca_group,
+            reason=reason,
+        )
+        self._critical_alert("Unprotected entry exposure", reason)
+        updated_state = self._activate_emergency_stop(reason, updated_state)
+        return await self._attempt_defensive_market_exit(
+            ib,
+            contract=contract,
+            trade_plan=trade_plan,
+            entry_status=entry_status,
+            state=updated_state,
+            reason=reason,
+        )
+
+    def _mark_cancelled_bracket_failure(self, state: BotState | None, *, reason: str) -> BotState | None:
+        if state is None:
+            return None
+
+        state.active_trade = {
+            **state.active_trade,
+            "status": ORDER_STATUS_CANCELLED,
+            "bracket_failure_reason": reason,
+            "bracket_failure_at": datetime.now(UTC).isoformat(),
+            "protective_orders_confirmed": False,
+        }
+        if self._state_store is not None:
+            self._state_store.save(state)
+        return state
+
+    def _mark_unprotected_entry(
+        self,
+        state: BotState | None,
+        *,
+        trade_plan: Any,
+        entry_status: ManagedOrderStatus,
+        stop_price: float,
+        take_profit_price: float,
+        oca_group: str,
+        reason: str,
+    ) -> BotState | None:
+        if state is None:
+            return None
+
+        state.active_trade = {
+            **_active_trade_payload(trade_plan, entry_status),
+            "protective_oca_group": oca_group,
+            "protective_orders_confirmed": False,
+            "product_stop_price": stop_price,
+            "product_take_profit_price": take_profit_price,
+            "protection_failure_reason": reason,
+            "protection_failure_at": datetime.now(UTC).isoformat(),
+            "manual_reconciliation_required": True,
+        }
+        if entry_status.order_id is not None and entry_status.order_id not in state.known_order_ids:
+            state.known_order_ids.append(entry_status.order_id)
+        if entry_status.perm_id is not None and entry_status.perm_id not in state.known_perm_ids:
+            state.known_perm_ids.append(entry_status.perm_id)
+        if self._state_store is not None:
+            self._state_store.save(state)
+        return state
+
+    def _activate_emergency_stop(self, reason: str, state: BotState | None) -> BotState | None:
+        if self._emergency_stop is not None:
+            try:
+                self._emergency_stop.activate(reason, state=state)
+            except Exception:
+                self._logger.exception("Emergency stop activation failed after unprotected entry.")
+            return state
+
+        if state is None:
+            return None
+
+        state.emergency_stop = True
+        state.active_trade = {
+            **state.active_trade,
+            "emergency_stop_reason": reason,
+            "emergency_stop_activated_at": datetime.now(UTC).isoformat(),
+        }
+        if self._state_store is not None:
+            self._state_store.save(state)
+        return state
+
+    async def _attempt_defensive_market_exit(
+        self,
+        ib: Any,
+        *,
+        contract: Any,
+        trade_plan: Any,
+        entry_status: ManagedOrderStatus,
+        state: BotState | None,
+        reason: str,
+    ) -> BotState | None:
+        try:
+            exit_order = self._builder.build_market_exit_order(trade_plan, quantity=entry_status.filled)
+            self._guard_order_accounts(BuiltOrderSet(entry_order=exit_order))
+            exit_trade = ib.placeOrder(contract, exit_order)
+            await asyncio.sleep(0)
+            exit_status = await self._wait_for_defensive_exit(
+                exit_trade,
+                trade_plan=trade_plan,
+                timeout_seconds=self._entry_fill_timeout_seconds,
+            )
+        except Exception as exc:
+            failure_reason = f"Defensive market exit failed after unprotected entry: {exc}"
+            self._logger.critical(failure_reason)
+            self._critical_alert("Defensive exit failed", failure_reason)
+            return self._persist_defensive_exit_state(
+                state,
+                status=None,
+                submitted=False,
+                confirmed=False,
+                reason=failure_reason,
+            )
+
+        self._record_status(exit_status, trade_plan)
+        self._notify_status(exit_status, trade_plan)
+        if exit_status.status == ORDER_STATUS_FILLED:
+            self._critical_alert(
+                "Defensive exit filled",
+                (
+                    "Defensive market exit filled after unprotected entry. "
+                    f"exit_order_id={exit_status.order_id} quantity={exit_status.filled}"
+                ),
+            )
+            return self._persist_defensive_exit_state(
+                state,
+                status=exit_status,
+                submitted=True,
+                confirmed=True,
+                reason=reason,
+            )
+
+        return self._persist_defensive_exit_state(
+            state,
+            status=exit_status,
+            submitted=True,
+            confirmed=False,
+            reason="Defensive exit did not reach Filled status before timeout.",
+        )
+
+    async def _wait_for_defensive_exit(
+        self,
+        trade: Any,
+        *,
+        trade_plan: Any,
+        timeout_seconds: float,
+    ) -> ManagedOrderStatus:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        last_status = _managed_status(trade, trade_plan)
+
+        while asyncio.get_running_loop().time() <= deadline:
+            last_status = _managed_status(trade, trade_plan)
+            if last_status.status == ORDER_STATUS_FILLED:
+                return last_status
+            if last_status.status in TERMINAL_ORDER_STATUSES - {ORDER_STATUS_FILLED}:
+                return last_status
+            await asyncio.sleep(self._status_poll_seconds)
+
+        return last_status
+
+    def _persist_defensive_exit_state(
+        self,
+        state: BotState | None,
+        *,
+        status: ManagedOrderStatus | None,
+        submitted: bool,
+        confirmed: bool,
+        reason: str,
+    ) -> BotState | None:
+        if state is None:
+            return None
+
+        defensive_exit: dict[str, Any] = {
+            "submitted": submitted,
+            "confirmed": confirmed,
+            "reason": reason,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        if status is not None:
+            defensive_exit.update(_protective_order_payload(status))
+            defensive_exit["filled"] = status.filled
+            defensive_exit["remaining"] = status.remaining
+            defensive_exit["avg_fill_price"] = status.avg_fill_price
+            if status.order_id is not None and status.order_id not in state.known_order_ids:
+                state.known_order_ids.append(status.order_id)
+            if status.perm_id is not None and status.perm_id not in state.known_perm_ids:
+                state.known_perm_ids.append(status.perm_id)
+
+        state.active_trade = {
+            **state.active_trade,
+            "defensive_exit": defensive_exit,
+            "manual_reconciliation_required": not confirmed,
+        }
+        if confirmed:
+            state.active_trade["status"] = TRADE_STATUS_CLOSED
+            state.active_trade["closed_at"] = datetime.now(UTC).isoformat()
+
+        if self._state_store is not None:
+            self._state_store.save(state)
+        return state
+
+    def _critical_alert(self, message: str, details: str) -> None:
+        if self._notifier is None:
+            return
+        method = getattr(self._notifier, "send_critical_error", None)
+        if callable(method):
+            method(message=message, details=details)
+
+    def _cancel_orders(self, ib: Any, trades: tuple[Any, ...]) -> None:
+        cancel_order = getattr(ib, "cancelOrder", None)
+        if not callable(cancel_order):
+            self._logger.warning("IB client has no cancelOrder method for failed bracket cleanup.")
+            return
+
+        for trade in trades:
+            order = getattr(trade, "order", None)
+            if order is None:
+                continue
+            try:
+                cancel_order(order)
+            except Exception:
+                self._logger.exception("Failed to cancel staged bracket order.")
+
     async def _wait_for_protective_submission(
         self,
         protective_trades: tuple[Any, ...],
@@ -369,6 +701,27 @@ class OrderManager:
             cancel_order(getattr(trade, "order", None))
         except Exception:
             self._logger.exception("Failed to cancel unfilled entry order after fill timeout.")
+
+    def _ensure_order_id(self, ib: Any, order: Any) -> int:
+        order_id = _optional_int_attr(order, "orderId")
+        if order_id is not None:
+            return order_id
+
+        client = getattr(ib, "client", None)
+        get_req_id = getattr(client, "getReqId", None)
+        if not callable(get_req_id):
+            raise OrderManagerError("Interactive Brokers client cannot allocate a parent order id for bracket orders.")
+
+        try:
+            order_id = int(get_req_id())
+        except Exception as exc:
+            raise OrderManagerError("Could not allocate a parent order id for bracket orders.") from exc
+
+        if order_id <= 0:
+            raise OrderManagerError("Interactive Brokers returned an invalid parent order id for bracket orders.")
+
+        order.orderId = order_id
+        return order_id
 
     def refresh_order_status(
         self,
@@ -718,10 +1071,19 @@ def _protective_product_prices(status: ManagedOrderStatus, trade_plan: Any) -> t
     if avg_fill_price <= 0:
         raise OrderManagerError("Cannot compute protective prices without a positive average fill price.")
 
+    return _protective_product_prices_from_reference(avg_fill_price, trade_plan)
+
+
+def _protective_product_prices_from_trade_plan(trade_plan: Any) -> tuple[float, float]:
+    product_price = _positive_float_attr(trade_plan, "product_price")
+    return _protective_product_prices_from_reference(product_price, trade_plan)
+
+
+def _protective_product_prices_from_reference(reference_price: float, trade_plan: Any) -> tuple[float, float]:
     product_sl_pct = _positive_float_attr(trade_plan, "product_sl_pct")
     product_tp_pct = _positive_float_attr(trade_plan, "product_tp_pct")
-    stop_price = avg_fill_price * (1 - product_sl_pct / 100)
-    take_profit_price = avg_fill_price * (1 + product_tp_pct / 100)
+    stop_price = reference_price * (1 - product_sl_pct / 100)
+    take_profit_price = reference_price * (1 + product_tp_pct / 100)
 
     if stop_price <= 0:
         raise OrderManagerError("Computed product stop price is not positive; refusing unprotected entry.")
@@ -732,11 +1094,15 @@ def _protective_product_prices(status: ManagedOrderStatus, trade_plan: Any) -> t
 def _oca_group_name(status: ManagedOrderStatus, trade_plan: Any) -> str:
     order_id = status.order_id
     if order_id is not None:
-        return f"ABM_ENTRY_{order_id}_OCA"
+        return _oca_group_name_from_order_id(order_id)
 
     signal_id = _optional_text_attr(trade_plan, "signal_id") or "UNKNOWN"
     sanitized = "".join(character if character.isalnum() else "_" for character in signal_id)
     return f"ABM_{sanitized}_OCA"
+
+
+def _oca_group_name_from_order_id(order_id: int) -> str:
+    return f"ABM_ENTRY_{order_id}_OCA"
 
 
 def _protective_order_payload(status: ManagedOrderStatus) -> dict[str, Any]:
