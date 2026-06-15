@@ -20,6 +20,7 @@ from domain.constants import (
     PAPER_MODE,
     TERMINAL_ORDER_STATUSES,
 )
+from config.defaults import DEFAULT_EXECUTION_ENTRY_ORDER_TYPE
 from logging_setup.logger import get_logger
 from monitoring.account_guard import account_guard_failures, configured_account_id
 from state.state_store import BotState, StateStore
@@ -770,9 +771,9 @@ def _looks_like_ib_client(value: Any) -> bool:
 
 def _entry_order_type_setting(source: Any) -> EntryOrderType:
     value = getattr(source, "entry_order_type", None)
-    if value == "market":
-        return "market"
-    raise OrderManagerError("execution.entry_order_type must be market.")
+    if value == DEFAULT_EXECUTION_ENTRY_ORDER_TYPE:
+        return DEFAULT_EXECUTION_ENTRY_ORDER_TYPE
+    raise OrderManagerError(f"execution.entry_order_type must be {DEFAULT_EXECUTION_ENTRY_ORDER_TYPE}.")
 
 
 def _positive_float_setting(source: Any, name: str) -> float:

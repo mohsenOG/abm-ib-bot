@@ -77,6 +77,7 @@ class ActiveTradeMonitor:
         self._state_store = state_store
         self._notifier = notifier
         self._emergency_stop = emergency_stop
+        self._client_id = settings.ib.client_id
         self._interval_seconds = interval_seconds or settings.runtime.active_trade_monitor_seconds
         execution_settings = getattr(settings, "execution", None)
         self._protective_submit_timeout_seconds = _positive_float_setting(
@@ -122,7 +123,7 @@ class ActiveTradeMonitor:
         state = self._save_quote_state(state, quote)
 
         try:
-            snapshot = await AccountReader(self._ib_client).read_snapshot()
+            snapshot = await AccountReader(self._ib_client, client_id=self._client_id).read_snapshot()
         except Exception as exc:
             reason = f"Active trade account reconciliation failed: {exc}"
             self._alert_once("account_snapshot", reason, active_trade=active_trade)
@@ -271,7 +272,9 @@ class ActiveTradeMonitor:
                 position=position,
                 health=health,
             )
-            snapshot = await AccountReader(self._ib_client).read_snapshot(include_executions=False)
+            snapshot = await AccountReader(self._ib_client, client_id=self._client_id).read_snapshot(
+                include_executions=False
+            )
             repaired_health = _protective_health(snapshot, state.active_trade)
             if not repaired_health.healthy:
                 raise ActiveTradeMonitorError(
@@ -359,7 +362,9 @@ class ActiveTradeMonitor:
         last_missing: tuple[str, ...] = ()
 
         while asyncio.get_running_loop().time() <= deadline:
-            snapshot = await AccountReader(self._ib_client).read_snapshot(include_executions=False)
+            snapshot = await AccountReader(self._ib_client, client_id=self._client_id).read_snapshot(
+                include_executions=False
+            )
             health = _protective_health(snapshot, active_trade)
             if health.healthy:
                 return

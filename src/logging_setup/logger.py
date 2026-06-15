@@ -7,6 +7,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from config.defaults import (
+    DEFAULT_LOG_DATE_FORMAT,
+    DEFAULT_LOG_FILE_PATH,
+    DEFAULT_LOG_FORMAT,
+    DEFAULT_LOG_LEVEL,
+)
 
 BOT_LOGGER_NAME = "abm_ib_bot"
 _HANDLER_MARKER = "_abm_ib_bot_handler"
@@ -30,15 +36,15 @@ def setup_logging(
     log_path = _resolve_file_path(logger_settings, file_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    log_level = _normalize_log_level(_resolve_setting(logger_settings, "level", level, "INFO"))
+    log_level = _normalize_log_level(_resolve_setting(logger_settings, "level", level, DEFAULT_LOG_LEVEL))
     formatter = logging.Formatter(
         _resolve_setting(
             logger_settings,
             "format",
             log_format,
-            "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+            DEFAULT_LOG_FORMAT,
         ),
-        datefmt=_resolve_setting(logger_settings, "date_format", date_format, "%Y-%m-%d %H:%M:%S"),
+        datefmt=_resolve_setting(logger_settings, "date_format", date_format, DEFAULT_LOG_DATE_FORMAT),
     )
 
     root_logger = logging.getLogger()
@@ -73,7 +79,7 @@ def get_logger(name: str | None = None) -> logging.Logger:
 
 
 def _resolve_file_path(settings: Any | None, file_path: str | Path | None) -> Path:
-    resolved = _resolve_setting(settings, "file_path", file_path, Path("logs") / "bot.log")
+    resolved = _resolve_setting(settings, "file_path", file_path, DEFAULT_LOG_FILE_PATH)
     return Path(resolved)
 
 

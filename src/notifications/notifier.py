@@ -11,9 +11,14 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from config.defaults import (
+    DEFAULT_TELEGRAM_ENABLED,
+    DEFAULT_TELEGRAM_MAX_RETRIES,
+    DEFAULT_TELEGRAM_RETRY_DELAY_SECONDS,
+    DEFAULT_TELEGRAM_TIMEOUT_SECONDS,
+)
 
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
-DEFAULT_TIMEOUT_SECONDS = 10.0
 
 
 class TelegramNotifierError(RuntimeError):
@@ -47,15 +52,30 @@ class TelegramNotifier:
     ) -> None:
         telegram_settings = getattr(settings, "telegram", settings)
 
-        self.enabled = _resolve_setting(telegram_settings, "enabled", enabled, True)
+        self.enabled = _resolve_setting(telegram_settings, "enabled", enabled, DEFAULT_TELEGRAM_ENABLED)
         self.bot_token = _resolve_setting(telegram_settings, "bot_token", bot_token, None)
         self.chat_ids = tuple(_resolve_setting(telegram_settings, "chat_ids", chat_ids, ()) or ())
-        self.max_retries = _resolve_setting(telegram_settings, "max_retries", max_retries, 3)
+        self.max_retries = _resolve_setting(
+            telegram_settings,
+            "max_retries",
+            max_retries,
+            DEFAULT_TELEGRAM_MAX_RETRIES,
+        )
         self.retry_delay_seconds = float(
-            _resolve_setting(telegram_settings, "retry_delay_seconds", retry_delay_seconds, 2.0)
+            _resolve_setting(
+                telegram_settings,
+                "retry_delay_seconds",
+                retry_delay_seconds,
+                DEFAULT_TELEGRAM_RETRY_DELAY_SECONDS,
+            )
         )
         self.timeout_seconds = float(
-            _resolve_setting(telegram_settings, "timeout_seconds", timeout_seconds, DEFAULT_TIMEOUT_SECONDS)
+            _resolve_setting(
+                telegram_settings,
+                "timeout_seconds",
+                timeout_seconds,
+                DEFAULT_TELEGRAM_TIMEOUT_SECONDS,
+            )
         )
         self.logger = logger or logging.getLogger(__name__)
 

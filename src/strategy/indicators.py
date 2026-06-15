@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from config.defaults import DEFAULT_STRATEGY_ATR_LENGTH
 from data.schema import CANDLE_CLOSE, CANDLE_HIGH, CANDLE_LOW, CANDLE_OPEN
 
 REQUIRED_PRICE_COLUMNS = (CANDLE_OPEN, CANDLE_HIGH, CANDLE_LOW, CANDLE_CLOSE)
@@ -18,7 +19,6 @@ MACD_PERIODS = (
 )
 BOLLINGER_PERIOD = 20
 BOLLINGER_STDDEV_MULTIPLIER = 2.0
-DEFAULT_ATR_PERIOD = 14
 ROC_PERIODS = (13, 27)
 BREAKOUT_PERIODS = (5, 17, 21)
 
@@ -31,7 +31,7 @@ def add_indicators(
     candles: pd.DataFrame,
     use_heikin_ashi: bool,
     *,
-    atr_period: int = DEFAULT_ATR_PERIOD,
+    atr_period: int = DEFAULT_STRATEGY_ATR_LENGTH,
 ) -> pd.DataFrame:
     """Return a new DataFrame with all indicators required by the ABM strategy."""
 

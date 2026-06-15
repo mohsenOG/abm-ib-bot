@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR, InvalidOperation
 from typing import Any
 
+from config.defaults import (
+    DEFAULT_SIZING_ALLOW_FRACTIONAL,
+    DEFAULT_SIZING_MIN_QUANTITY,
+    DEFAULT_SIZING_QUANTITY_STEP,
+)
+
 
 class RiskSizingError(ValueError):
     """Raised when a trade quantity cannot be sized safely."""
@@ -13,9 +19,9 @@ class RiskSizingError(ValueError):
 
 @dataclass(frozen=True)
 class QuantityRules:
-    min_quantity: Decimal = Decimal("1")
-    quantity_step: Decimal = Decimal("1")
-    allow_fractional: bool = False
+    min_quantity: Decimal = DEFAULT_SIZING_MIN_QUANTITY
+    quantity_step: Decimal = DEFAULT_SIZING_QUANTITY_STEP
+    allow_fractional: bool = DEFAULT_SIZING_ALLOW_FRACTIONAL
 
 
 def quantity_rules_from_settings(settings: Any) -> QuantityRules:

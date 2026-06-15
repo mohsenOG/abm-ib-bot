@@ -48,7 +48,6 @@ risk:
   max_concurrent_position_slots: 1
 
 strategy:
-  model_version: abm_21_vote_v1
   bias_threshold: 0.2
   use_heikin_ashi: true
   atr_length: 14

@@ -7,10 +7,11 @@ from typing import Any, Literal
 
 from ib_async import LimitOrder, MarketOrder, Order, StopOrder
 
+from config.defaults import DEFAULT_EXECUTION_ENTRY_ORDER_TYPE
 from domain.constants import BROKER_ACTION_BUY, BROKER_ACTION_SELL, BROKER_ACTIONS
 
 OrderAction = Literal["BUY", "SELL"]
-EntryOrderType = Literal["market", "limit"]
+EntryOrderType = Literal["market"]
 
 
 class OrderBuilderError(ValueError):
@@ -47,7 +48,7 @@ class OrderBuilder:
         self,
         trade_plan: Any,
         *,
-        order_type: EntryOrderType = "market",
+        order_type: EntryOrderType = DEFAULT_EXECUTION_ENTRY_ORDER_TYPE,
         limit_price: float | None = None,
         stop_loss_price: float | None = None,
         take_profit_price: float | None = None,
@@ -97,12 +98,7 @@ class OrderBuilder:
     def build_market_order(self, trade_plan: Any) -> Order:
         """Build a single market entry order."""
 
-        return self.build_order_set(trade_plan, order_type="market").entry_order
-
-    def build_limit_order(self, trade_plan: Any, *, limit_price: float) -> Order:
-        """Build a single limit entry order."""
-
-        return self.build_order_set(trade_plan, order_type="limit", limit_price=limit_price).entry_order
+        return self.build_order_set(trade_plan, order_type=DEFAULT_EXECUTION_ENTRY_ORDER_TYPE).entry_order
 
     def build_exit_oca_orders(
         self,
@@ -148,16 +144,12 @@ class OrderBuilder:
         order_type: EntryOrderType,
         limit_price: float | None,
     ) -> Order:
-        if order_type == "market":
+        if order_type == DEFAULT_EXECUTION_ENTRY_ORDER_TYPE:
             if limit_price is not None:
                 raise OrderBuilderError("limit_price is only valid for limit orders.")
             return MarketOrder(action, quantity)
 
-        if order_type == "limit":
-            price = _positive_float(limit_price, "limit_price")
-            return LimitOrder(action, quantity, price)
-
-        raise OrderBuilderError("order_type must be 'market' or 'limit'.")
+        raise OrderBuilderError("order_type must be 'market'.")
 
     def _build_protective_orders(
         self,

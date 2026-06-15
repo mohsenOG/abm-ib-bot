@@ -9,6 +9,16 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from config.defaults import (
+    DEFAULT_EXECUTION_ENTRY_ORDER_TYPE,
+    DEFAULT_RUNTIME_ACTIVE_TRADE_MONITOR_SECONDS,
+    DEFAULT_STRATEGY_USE_HEIKIN_ASHI,
+    DEFAULT_TELEGRAM_ENABLED,
+    DEFAULT_TELEGRAM_MAX_RETRIES,
+    DEFAULT_TELEGRAM_RETRY_DELAY_SECONDS,
+    DEFAULT_TELEGRAM_TIMEOUT_SECONDS,
+)
+from data.timeframes import SUPPORTED_BAR_SIZE_1_HOUR
 from domain.constants import EXECUTION_SIDE_LONG, EXECUTION_SIDE_SHORT, TRADING_MODES
 from ib_gateway.constants import (
     EUR_CURRENCY,
@@ -17,8 +27,7 @@ from ib_gateway.constants import (
     USD_CURRENCY,
 )
 
-SUPPORTED_MARKET_DATA_BAR_SIZE = "1 hour"
-SUPPORTED_ENTRY_ORDER_TYPES = {"market"}
+SUPPORTED_ENTRY_ORDER_TYPES = {DEFAULT_EXECUTION_ENTRY_ORDER_TYPE}
 
 
 class SettingsValidationError(ValueError):
@@ -121,7 +130,6 @@ class RiskSettings:
 
 @dataclass(frozen=True)
 class StrategySettings:
-    model_version: str
     bias_threshold: float
     use_heikin_ashi: bool
     atr_length: int
@@ -284,9 +292,9 @@ def _load_market_data(raw: dict[str, Any]) -> MarketDataSettings:
         "market_data.candle_close_buffer_seconds",
     )
 
-    if bar_size != SUPPORTED_MARKET_DATA_BAR_SIZE:
+    if bar_size != SUPPORTED_BAR_SIZE_1_HOUR:
         raise SettingsValidationError(
-            f"market_data.bar_size must be exactly '{SUPPORTED_MARKET_DATA_BAR_SIZE}' for this strategy model."
+            f"market_data.bar_size must be exactly '{SUPPORTED_BAR_SIZE_1_HOUR}' for this strategy."
         )
 
     if candle_close_buffer_seconds < 0:
@@ -330,15 +338,20 @@ def _load_ib(raw: dict[str, Any]) -> IBSettings:
 
 def _load_telegram(raw: dict[str, Any]) -> TelegramSettings:
     section = _optional_section(raw, "telegram")
-    enabled = _optional_bool(section, "enabled", "telegram.enabled", True)
-    max_retries = _optional_int(section, "max_retries", "telegram.max_retries", 3)
+    enabled = _optional_bool(section, "enabled", "telegram.enabled", DEFAULT_TELEGRAM_ENABLED)
+    max_retries = _optional_int(section, "max_retries", "telegram.max_retries", DEFAULT_TELEGRAM_MAX_RETRIES)
     retry_delay_seconds = _optional_float(
         section,
         "retry_delay_seconds",
         "telegram.retry_delay_seconds",
-        2.0,
+        DEFAULT_TELEGRAM_RETRY_DELAY_SECONDS,
     )
-    timeout_seconds = _optional_float(section, "timeout_seconds", "telegram.timeout_seconds", 10.0)
+    timeout_seconds = _optional_float(
+        section,
+        "timeout_seconds",
+        "telegram.timeout_seconds",
+        DEFAULT_TELEGRAM_TIMEOUT_SECONDS,
+    )
 
     if max_retries < 0:
         raise SettingsValidationError("telegram.max_retries must be zero or greater.")
@@ -431,7 +444,7 @@ def _load_execution(raw: dict[str, Any], project_root: Path) -> ExecutionSetting
     if entry_order_type not in SUPPORTED_ENTRY_ORDER_TYPES:
         allowed = ", ".join(sorted(SUPPORTED_ENTRY_ORDER_TYPES))
         raise SettingsValidationError(
-            f"execution.entry_order_type must be one of: {allowed}. Limit entries are not supported yet."
+            f"execution.entry_order_type must be one of: {allowed}."
         )
 
     if entry_fill_timeout_seconds <= 0:
@@ -589,9 +602,13 @@ def _load_risk(raw: dict[str, Any]) -> RiskSettings:
 
 def _load_strategy(raw: dict[str, Any]) -> StrategySettings:
     section = _required_section(raw, "strategy")
-    model_version = _required_string(section, "model_version", "strategy.model_version")
     bias_threshold = _required_float(section, "bias_threshold", "strategy.bias_threshold")
-    use_heikin_ashi = _optional_bool(section, "use_heikin_ashi", "strategy.use_heikin_ashi", False)
+    use_heikin_ashi = _optional_bool(
+        section,
+        "use_heikin_ashi",
+        "strategy.use_heikin_ashi",
+        DEFAULT_STRATEGY_USE_HEIKIN_ASHI,
+    )
     atr_length = _required_int(section, "atr_length", "strategy.atr_length")
     sl_atr_mult = _required_float(section, "sl_atr_mult", "strategy.sl_atr_mult")
     tp_atr_mult = _required_float(section, "tp_atr_mult", "strategy.tp_atr_mult")
@@ -609,7 +626,6 @@ def _load_strategy(raw: dict[str, Any]) -> StrategySettings:
         raise SettingsValidationError("strategy.tp_atr_mult must be greater than zero.")
 
     return StrategySettings(
-        model_version=model_version,
         bias_threshold=bias_threshold,
         use_heikin_ashi=use_heikin_ashi,
         atr_length=atr_length,
@@ -653,7 +669,7 @@ def _load_runtime(raw: dict[str, Any]) -> RuntimeSettings:
         section,
         "active_trade_monitor_seconds",
         "runtime.active_trade_monitor_seconds",
-        10,
+        DEFAULT_RUNTIME_ACTIVE_TRADE_MONITOR_SECONDS,
     )
 
     if poll_seconds <= 0:

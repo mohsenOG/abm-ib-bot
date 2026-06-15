@@ -10,7 +10,7 @@ Start one manual cycle:
 $env:PYTHONPATH="src"; python src/main.py run --once
 ```
 
-The runner uses `settings.yml` for non-secret runtime behavior. Live mode is readiness-check only for now and fails closed before any live order path.
+The runner uses `settings.yml` for non-secret runtime behavior. `live.enabled` is a readiness gate only; live execution is still disabled and fails closed before any live order path.
 
 ## Configuration
 
@@ -26,24 +26,17 @@ TELEGRAM_CHAT_IDS=
 
 Do not put real secrets in `settings.yml` or `.env.example`.
 
-`execution.products_file` points to the curated execution-products JSON. Relative paths are resolved against the project root. Product identifiers and account-specific values are expected to be filled per deployment; the loader validates shape and supported product type, not whether a real broker ID is correct.
+Relative paths in `settings.yml`, including `execution.products_file`, `logger.file_path`, `paths.state_file`, and `paths.trade_journal_file`, are resolved against the project root. `execution.products_file` points to the curated execution-products JSON. Product identifiers and account-specific values are expected to be filled per deployment; the loader validates shape and supported product type, not whether a real broker ID is correct.
 
 `market_data.bar_size` currently supports only `1 hour`, matching the fixed strategy model. The historical duration, IB `whatToShow`, RTH flag, and candle-close buffer are configured under `market_data`.
 
-Execution behavior is configured under `execution`. Entry orders currently support only `market`; `limit` is rejected until a safe limit-price path is implemented.
+Execution behavior is configured under `execution`. Entry orders currently support only `market`; unsupported order types are rejected during settings load.
 
 Sizing is configured under `sizing` and feeds runtime quantity rules. The current app-level quantity rules are not inferred from IB contract metadata.
 
 Health thresholds live under `health`, including market-data age, last processed candle age, and repeated error limit.
 
-The current strategy is explicitly governed by:
-
-```yaml
-strategy:
-  model_version: abm_21_vote_v1
-```
-
-Indicator periods and vote rules remain fixed in code for this model version unless a future validated/backtested configuration phase changes that.
+Indicator periods and vote rules remain fixed in code unless a future validated/backtested configuration phase changes that.
 
 ## Dependencies
 

@@ -8,6 +8,11 @@ from typing import Literal
 
 import pandas as pd
 
+from config.defaults import (
+    DEFAULT_STRATEGY_ATR_LENGTH,
+    DEFAULT_STRATEGY_SL_ATR_MULT,
+    DEFAULT_STRATEGY_TP_ATR_MULT,
+)
 from data.schema import CANDLE_CLOSE, CANDLE_TIMESTAMP
 from domain.constants import SIGNAL_DIRECTION_BUY, SIGNAL_DIRECTION_SELL
 from ib_gateway.constants import SIGNAL_SYMBOL_XAUUSD
@@ -56,9 +61,9 @@ def generate_signal(
     last_signal_id: str | None = None,
     *,
     underlying_symbol: str = SIGNAL_SYMBOL_XAUUSD,
-    atr_length: int = 14,
-    sl_atr_mult: float = 1.0,
-    tp_atr_mult: float = 2.0,
+    atr_length: int = DEFAULT_STRATEGY_ATR_LENGTH,
+    sl_atr_mult: float = DEFAULT_STRATEGY_SL_ATR_MULT,
+    tp_atr_mult: float = DEFAULT_STRATEGY_TP_ATR_MULT,
 ) -> Signal | None:
     """Return the latest BUY/SELL signal from bias crossover, or None."""
 
