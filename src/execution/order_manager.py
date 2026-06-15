@@ -44,6 +44,21 @@ class OrderManagerError(RuntimeError):
     """Raised when a paper order cannot be submitted or tracked safely."""
 
 
+class PartialFillTimeout(OrderManagerError):
+    """Raised internally when an entry timeout leaves a real partial position."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: ManagedOrderStatus,
+        cancellation_confirmed: bool,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.cancellation_confirmed = cancellation_confirmed
+
+
 @dataclass(frozen=True)
 class ManagedOrderStatus:
     order_id: int | None
@@ -250,6 +265,23 @@ class OrderManager:
                 take_profit_price=take_profit_price,
                 oca_group=oca_group,
             )
+        except PartialFillTimeout as exc:
+            replacement_trades, updated_state = await self._handle_partial_fill_timeout(
+                active_ib,
+                contract=contract,
+                trade_plan=trade_plan,
+                entry_trade=trade,
+                original_protective_trades=protective_trades,
+                state=updated_state,
+                partial_status=exc.status,
+                cancellation_confirmed=exc.cancellation_confirmed,
+            )
+            return ManagedOrderResult(
+                trade=trade,
+                status=exc.status,
+                state=updated_state,
+                protective_trades=tuple(replacement_trades),
+            )
         except Exception as exc:
             updated_state = await self._handle_bracket_failure(
                 active_ib,
@@ -301,13 +333,49 @@ class OrderManager:
                 return last_status
 
             if last_status.status in TERMINAL_ORDER_STATUSES - {ORDER_STATUS_FILLED}:
+                if last_status.filled > 0 and last_status.avg_fill_price > 0:
+                    self._process_status_update(
+                        last_status,
+                        trade_plan,
+                        state,
+                        source="partial_fill_terminal",
+                        force=True,
+                    )
+                    raise PartialFillTimeout(
+                        f"Entry order stopped at partial fill with terminal status: {last_status.status}.",
+                        status=_managed_status(trade, trade_plan),
+                        cancellation_confirmed=True,
+                    )
                 raise OrderManagerError(f"Entry order reached terminal status before fill: {last_status.status}.")
 
             await asyncio.sleep(self._status_poll_seconds)
 
         if last_status.filled > 0 and last_status.avg_fill_price > 0:
-            raise OrderManagerError(
-                "Entry order partially filled before timeout; manual reconciliation is required before continuing."
+            self._process_status_update(last_status, trade_plan, state, source="partial_fill_timeout", force=True)
+            self._cancel_unfilled_entry(ib, trade)
+            cancel_status, cancellation_confirmed = await self._wait_for_entry_cancel_confirmation(
+                trade,
+                trade_plan=trade_plan,
+                timeout_seconds=self._protective_submit_timeout_seconds,
+            )
+            if cancel_status.status == ORDER_STATUS_FILLED:
+                if cancel_status.avg_fill_price <= 0 or cancel_status.filled <= 0:
+                    raise OrderManagerError("Entry order filled without a usable average fill price.")
+                return cancel_status
+
+            self._process_status_update(
+                cancel_status,
+                trade_plan,
+                state,
+                source="partial_fill_cancel_wait",
+                force=True,
+            )
+            raise PartialFillTimeout(
+                "Entry order partially filled before timeout; remaining quantity was cancelled."
+                if cancellation_confirmed
+                else "Entry order partially filled before timeout; remaining quantity cancellation was not confirmed.",
+                status=cancel_status,
+                cancellation_confirmed=cancellation_confirmed,
             )
 
         self._cancel_unfilled_entry(ib, trade)
@@ -365,6 +433,125 @@ class OrderManager:
             oca_group=oca_group,
         )
         return protective_trades, updated_state
+
+    async def _handle_partial_fill_timeout(
+        self,
+        ib: Any,
+        *,
+        contract: Any,
+        trade_plan: Any,
+        entry_trade: Any,
+        original_protective_trades: tuple[Any, ...],
+        state: BotState | None,
+        partial_status: ManagedOrderStatus,
+        cancellation_confirmed: bool,
+    ) -> tuple[tuple[Any, ...], BotState | None]:
+        reason = (
+            "Entry order partially filled before timeout. "
+            f"filled={partial_status.filled} remaining={partial_status.remaining} "
+            f"entry_order_id={partial_status.order_id} cancellation_confirmed={cancellation_confirmed}"
+        )
+        stop_price, take_profit_price = _protective_product_prices(partial_status, trade_plan)
+        oca_group = _oca_group_name(partial_status, trade_plan)
+        self._logger.critical(reason)
+        self._critical_alert("Partial entry fill", reason)
+
+        if not cancellation_confirmed:
+            await self._handle_bracket_failure(
+                ib,
+                contract=contract,
+                trade_plan=trade_plan,
+                entry_trade=entry_trade,
+                protective_trades=original_protective_trades,
+                state=state,
+                stop_price=stop_price,
+                take_profit_price=take_profit_price,
+                oca_group=oca_group,
+                cause=OrderManagerError("Entry remaining quantity cancellation was not confirmed after partial fill."),
+            )
+            raise OrderManagerError(
+                "Entry partially filled and remaining quantity cancellation was not confirmed; defensive exit attempted."
+            )
+
+        if not await self._cancel_trades_and_wait(
+            ib,
+            original_protective_trades,
+            trade_plan=trade_plan,
+            timeout_seconds=self._protective_submit_timeout_seconds,
+        ):
+            await self._handle_bracket_failure(
+                ib,
+                contract=contract,
+                trade_plan=trade_plan,
+                entry_trade=entry_trade,
+                protective_trades=original_protective_trades,
+                state=state,
+                stop_price=stop_price,
+                take_profit_price=take_profit_price,
+                oca_group=oca_group,
+                cause=OrderManagerError("Original full-quantity bracket children were not cancelled after partial fill."),
+            )
+            raise OrderManagerError(
+                "Entry partially filled and original bracket child cancellation was not confirmed; defensive exit attempted."
+            )
+
+        try:
+            replacement_trades, updated_state = await self._submit_protective_oca_orders(
+                ib,
+                contract=contract,
+                trade_plan=trade_plan,
+                entry_status=partial_status,
+                state=state,
+            )
+        except Exception as exc:
+            await self._handle_bracket_failure(
+                ib,
+                contract=contract,
+                trade_plan=trade_plan,
+                entry_trade=entry_trade,
+                protective_trades=(),
+                state=state,
+                stop_price=stop_price,
+                take_profit_price=take_profit_price,
+                oca_group=oca_group,
+                cause=exc,
+            )
+            raise OrderManagerError(
+                "Entry partially filled but replacement broker-side OCA protection could not be confirmed."
+            ) from exc
+
+        updated_state = self._mark_partial_fill_protected(
+            updated_state,
+            partial_status=partial_status,
+            reason=reason,
+        )
+        updated_state = self._activate_emergency_stop(reason, updated_state)
+        return replacement_trades, updated_state
+
+    def _mark_partial_fill_protected(
+        self,
+        state: BotState | None,
+        *,
+        partial_status: ManagedOrderStatus,
+        reason: str,
+    ) -> BotState | None:
+        if state is None:
+            return None
+
+        state.active_trade = {
+            **state.active_trade,
+            "status": partial_status.status,
+            "filled": partial_status.filled,
+            "remaining": partial_status.remaining,
+            "avg_fill_price": partial_status.avg_fill_price,
+            "partial_fill_timeout": True,
+            "partial_fill_reason": reason,
+            "partial_fill_handled_at": datetime.now(UTC).isoformat(),
+            "manual_reconciliation_required": True,
+        }
+        if self._state_store is not None:
+            self._state_store.save(state)
+        return state
 
     async def _handle_bracket_failure(
         self,
@@ -701,6 +888,53 @@ class OrderManager:
             cancel_order(getattr(trade, "order", None))
         except Exception:
             self._logger.exception("Failed to cancel unfilled entry order after fill timeout.")
+
+    async def _wait_for_entry_cancel_confirmation(
+        self,
+        trade: Any,
+        *,
+        trade_plan: Any,
+        timeout_seconds: float,
+    ) -> tuple[ManagedOrderStatus, bool]:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        last_status = _managed_status(trade, trade_plan)
+
+        while asyncio.get_running_loop().time() <= deadline:
+            last_status = _managed_status(trade, trade_plan)
+            if last_status.status == ORDER_STATUS_FILLED:
+                return last_status, True
+            if last_status.status in TERMINAL_ORDER_STATUSES - {ORDER_STATUS_FILLED}:
+                return last_status, True
+            await asyncio.sleep(self._status_poll_seconds)
+
+        return last_status, False
+
+    async def _cancel_trades_and_wait(
+        self,
+        ib: Any,
+        trades: tuple[Any, ...],
+        *,
+        trade_plan: Any,
+        timeout_seconds: float,
+    ) -> bool:
+        if not trades:
+            return True
+
+        self._cancel_orders(ib, trades)
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+
+        while asyncio.get_running_loop().time() <= deadline:
+            statuses = [_managed_status(trade, trade_plan) for trade in trades]
+            if all(status.status in TERMINAL_ORDER_STATUSES for status in statuses):
+                return True
+            await asyncio.sleep(self._status_poll_seconds)
+
+        details = ", ".join(
+            f"order_id={status.order_id} status={status.status}"
+            for status in (_managed_status(trade, trade_plan) for trade in trades)
+        )
+        self._logger.critical("Timed out waiting for bracket child cancellation after partial fill. %s", details)
+        return False
 
     def _ensure_order_id(self, ib: Any, order: Any) -> int:
         order_id = _optional_int_attr(order, "orderId")
