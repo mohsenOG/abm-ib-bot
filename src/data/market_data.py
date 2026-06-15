@@ -31,6 +31,7 @@ class MarketDataError(RuntimeError):
 @dataclass(frozen=True)
 class HistoricalDataRequest:
     end_datetime: str = ""
+    duration_str: str | None = None
 
 
 class MarketDataClient:
@@ -64,7 +65,7 @@ class MarketDataClient:
         self._logger.info(
             "Requesting IB historical bars. bar_size=%s duration=%s what_to_show=%s use_rth=%s",
             self._settings.bar_size,
-            self._settings.historical_duration,
+            _duration_str(data_request, self._settings.historical_duration),
             self._settings.what_to_show,
             self._settings.use_rth,
         )
@@ -73,7 +74,7 @@ class MarketDataClient:
             bars = await ib.reqHistoricalDataAsync(
                 contract,
                 endDateTime=data_request.end_datetime,
-                durationStr=self._settings.historical_duration,
+                durationStr=_duration_str(data_request, self._settings.historical_duration),
                 barSizeSetting=self._settings.bar_size,
                 whatToShow=self._settings.what_to_show,
                 useRTH=self._settings.use_rth,
@@ -135,6 +136,14 @@ def _looks_like_ib_client(value: Any) -> bool:
 def _validate_request(request: HistoricalDataRequest) -> None:
     if not isinstance(request.end_datetime, str):
         raise MarketDataError("Historical data end_datetime must be a string.")
+    if request.duration_str is not None and (
+        not isinstance(request.duration_str, str) or not request.duration_str.strip()
+    ):
+        raise MarketDataError("Historical data duration_str must be a non-empty string when provided.")
+
+
+def _duration_str(request: HistoricalDataRequest, default: str) -> str:
+    return request.duration_str.strip() if request.duration_str is not None else default
 
 
 def _bars_to_frame(bars: Any) -> pd.DataFrame:

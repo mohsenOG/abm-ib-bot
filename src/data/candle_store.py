@@ -110,6 +110,15 @@ class CandleStore:
         mask = self._candles[CANDLE_TIMESTAMP] > self._latest_processed_candle_ts
         return self._candles.loc[mask].reset_index(drop=True).copy()
 
+    def trim_to_latest(self, max_rows: int) -> None:
+        """Keep only the most recent candles needed by the runtime session."""
+
+        if isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows <= 0:
+            raise CandleStoreError("max_rows must be a positive integer.")
+        if len(self._candles) <= max_rows:
+            return
+        self._candles = self._candles.tail(max_rows).reset_index(drop=True)
+
     def mark_processed(self, timestamp: Any) -> None:
         """Mark a stored candle timestamp as processed."""
 

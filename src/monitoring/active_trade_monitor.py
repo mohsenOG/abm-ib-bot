@@ -188,16 +188,18 @@ class ActiveTradeMonitor:
         raise ActiveTradeMonitorError(last_error)
 
     def _save_quote_state(self, state: BotState, quote: ProductQuote) -> BotState:
-        state.active_trade = {
-            **state.active_trade,
-            "monitor_last_checked_at": datetime.now(UTC).isoformat(),
-            "monitor_last_bid": quote.bid,
-            "monitor_last_ask": quote.ask,
-            "monitor_last_quote_time": quote.quote_time.isoformat(),
-            "monitor_last_spread_pct": quote.spread_pct,
-        }
-        self._state_store.save(state)
-        return state
+        def update(current: BotState) -> BotState:
+            current.active_trade = {
+                **current.active_trade,
+                "monitor_last_checked_at": datetime.now(UTC).isoformat(),
+                "monitor_last_bid": quote.bid,
+                "monitor_last_ask": quote.ask,
+                "monitor_last_quote_time": quote.quote_time.isoformat(),
+                "monitor_last_spread_pct": quote.spread_pct,
+            }
+            return current
+
+        return self._state_store.transaction(update)
 
     def _handle_missing_position(
         self,
@@ -217,8 +219,7 @@ class ActiveTradeMonitor:
             return
 
         closed_at = datetime.now(UTC).isoformat()
-        state.active_trade = {}
-        self._state_store.save(state)
+        self._state_store.transaction(lambda current: _clear_active_trade_state(current))
         self._alert_once(
             "protective_fill_closed",
             _monitor_message(
@@ -258,12 +259,16 @@ class ActiveTradeMonitor:
             self._emergency_stop.activate(reason, state=state)
             return
 
-        state.active_trade = {
-            **active_trade,
-            "protective_resubmit_issue_key": issue_key,
-            "protective_resubmit_attempted_at": datetime.now(UTC).isoformat(),
-        }
-        self._state_store.save(state)
+        state = self._state_store.transaction(
+            lambda current: _merge_active_trade_state(
+                current,
+                {
+                    **active_trade,
+                    "protective_resubmit_issue_key": issue_key,
+                    "protective_resubmit_attempted_at": datetime.now(UTC).isoformat(),
+                },
+            )
+        )
 
         try:
             await self._resubmit_missing_protection(
@@ -294,14 +299,9 @@ class ActiveTradeMonitor:
             self._emergency_stop.activate(reason, state=state)
             return
 
-        repaired_state = self._state_store.load()
-        repaired_state.active_trade = {
-            **repaired_state.active_trade,
-            "protective_orders_confirmed": True,
-            "protective_orders": _protective_order_payloads(repaired_health),
-        }
-        repaired_state.active_trade.pop("protective_resubmit_issue_key", None)
-        self._state_store.save(repaired_state)
+        repaired_state = self._state_store.transaction(
+            lambda current: _mark_repaired_protection(current, repaired_health)
+        )
         self._notify(
             _monitor_message(
                 "Broker-side protection restored by active trade monitor.",
@@ -381,8 +381,7 @@ class ActiveTradeMonitor:
         active_trade.pop("protective_resubmit_issue_key", None)
         active_trade["protective_orders_confirmed"] = True
         active_trade["protective_orders"] = _protective_order_payloads(health)
-        state.active_trade = active_trade
-        self._state_store.save(state)
+        self._state_store.transaction(lambda current: _merge_active_trade_state(current, active_trade))
 
     def _alert_once(self, key: str, message: str, *, active_trade: dict[str, Any]) -> None:
         issue_key = _issue_key(key, active_trade)
@@ -412,6 +411,27 @@ def _is_monitorable_active_trade(active_trade: dict[str, Any]) -> bool:
         return False
     filled = float(active_trade.get("filled", 0.0) or 0.0)
     return filled > 0 and active_trade.get("product_con_id") is not None
+
+
+def _clear_active_trade_state(state: BotState) -> BotState:
+    state.active_trade = {}
+    return state
+
+
+def _merge_active_trade_state(state: BotState, active_trade: dict[str, Any]) -> BotState:
+    state.active_trade = {**state.active_trade, **active_trade}
+    return state
+
+
+def _mark_repaired_protection(state: BotState, health: ProtectiveHealth) -> BotState:
+    active_trade = {
+        **state.active_trade,
+        "protective_orders_confirmed": True,
+        "protective_orders": _protective_order_payloads(health),
+    }
+    active_trade.pop("protective_resubmit_issue_key", None)
+    state.active_trade = active_trade
+    return state
 
 
 def _matching_position(snapshot: AccountSnapshot, active_trade: dict[str, Any]) -> PositionSnapshot | None:

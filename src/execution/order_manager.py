@@ -236,6 +236,12 @@ class OrderManager:
                 oca_group=oca_group,
                 cause=exc,
             )
+            if _exposure_failure_was_handled(updated_state) and trade is not None:
+                return ManagedOrderResult(
+                    trade=trade,
+                    status=_managed_status(trade, trade_plan),
+                    state=updated_state,
+                )
             if isinstance(exc, OrderManagerError):
                 raise
             raise OrderManagerError("Failed to submit broker-side bracket order set.") from exc
@@ -295,6 +301,12 @@ class OrderManager:
                 oca_group=oca_group,
                 cause=exc,
             )
+            if _exposure_failure_was_handled(updated_state):
+                return ManagedOrderResult(
+                    trade=trade,
+                    status=_managed_status(trade, trade_plan),
+                    state=updated_state,
+                )
             if isinstance(exc, OrderManagerError):
                 raise
             raise OrderManagerError("Broker-side bracket protection could not be confirmed.") from exc
@@ -593,6 +605,7 @@ class OrderManager:
             f"cause={type(cause).__name__}: {cause}"
         )
         self._logger.critical(reason)
+        missing_protection = _missing_protection_type(protective_trades, trade_plan)
         updated_state = self._mark_unprotected_entry(
             updated_state,
             trade_plan=trade_plan,
@@ -600,10 +613,46 @@ class OrderManager:
             stop_price=stop_price,
             take_profit_price=take_profit_price,
             oca_group=oca_group,
+            missing_protection=missing_protection,
             reason=reason,
         )
-        self._critical_alert("Unprotected entry exposure", reason)
+        alert_details = _protection_failure_message(
+            updated_state.active_trade if updated_state is not None else _active_trade_payload(trade_plan, entry_status),
+            reason=reason,
+            missing_protection=missing_protection,
+        )
+        self._critical_alert("Unprotected entry exposure", alert_details)
         updated_state = self._activate_emergency_stop(reason, updated_state)
+
+        try:
+            self._cancel_orders(ib, protective_trades)
+            replacement_trades, replacement_state = await self._submit_protective_oca_orders(
+                ib,
+                contract=contract,
+                trade_plan=trade_plan,
+                entry_status=entry_status,
+                state=updated_state,
+            )
+            repaired_state = self._mark_protection_resubmitted(
+                replacement_state,
+                protective_trades=replacement_trades,
+                reason=reason,
+            )
+            self._critical_alert(
+                "Protection resubmitted after failure",
+                _protection_resubmitted_message(
+                    repaired_state.active_trade if repaired_state is not None else {},
+                    reason=reason,
+                ),
+            )
+            return repaired_state
+        except Exception as exc:
+            self._logger.critical("Protective remediation resubmit failed; attempting defensive exit. error=%s", exc)
+            self._critical_alert(
+                "Protection resubmit failed",
+                f"{alert_details}\nresubmit_error: {exc}\nnext_action: defensive market exit",
+            )
+
         return await self._attempt_defensive_market_exit(
             ib,
             contract=contract,
@@ -637,6 +686,7 @@ class OrderManager:
         stop_price: float,
         take_profit_price: float,
         oca_group: str,
+        missing_protection: str,
         reason: str,
     ) -> BotState | None:
         if state is None:
@@ -646,6 +696,8 @@ class OrderManager:
             **_active_trade_payload(trade_plan, entry_status),
             "protective_oca_group": oca_group,
             "protective_orders_confirmed": False,
+            "protection_missing": True,
+            "missing_protection_type": missing_protection,
             "product_stop_price": stop_price,
             "product_take_profit_price": take_profit_price,
             "protection_failure_reason": reason,
@@ -660,13 +712,43 @@ class OrderManager:
             self._state_store.save(state)
         return state
 
+    def _mark_protection_resubmitted(
+        self,
+        state: BotState | None,
+        *,
+        protective_trades: tuple[Any, ...],
+        reason: str,
+    ) -> BotState | None:
+        if state is None:
+            return None
+
+        state.active_trade = {
+            **state.active_trade,
+            "protection_missing": False,
+            "protective_orders_confirmed": True,
+            "protection_resubmitted_after_failure": True,
+            "protection_resubmitted_at": datetime.now(UTC).isoformat(),
+            "protection_failure_reason": reason,
+            "manual_reconciliation_required": True,
+        }
+        state.active_trade.pop("missing_protection_type", None)
+        for trade in protective_trades:
+            status = _managed_status(trade, None)
+            if status.order_id is not None and status.order_id not in state.known_order_ids:
+                state.known_order_ids.append(status.order_id)
+            if status.perm_id is not None and status.perm_id not in state.known_perm_ids:
+                state.known_perm_ids.append(status.perm_id)
+        if self._state_store is not None:
+            self._state_store.save(state)
+        return state
+
     def _activate_emergency_stop(self, reason: str, state: BotState | None) -> BotState | None:
         if self._emergency_stop is not None:
             try:
                 self._emergency_stop.activate(reason, state=state)
             except Exception:
                 self._logger.exception("Emergency stop activation failed after unprotected entry.")
-            return state
+            return self._load_state(None) or state
 
         if state is None:
             return None
@@ -1348,6 +1430,80 @@ def _protective_order_payload(status: ManagedOrderStatus) -> dict[str, Any]:
         "order_type": status.order_type,
         "total_quantity": status.total_quantity,
     }
+
+
+def _exposure_failure_was_handled(state: BotState | None) -> bool:
+    if state is None:
+        return False
+    active_trade = state.active_trade
+    defensive_exit = active_trade.get("defensive_exit")
+    return bool(
+        active_trade.get("protection_resubmitted_after_failure")
+        or (isinstance(defensive_exit, dict) and defensive_exit.get("submitted"))
+    )
+
+
+def _missing_protection_type(protective_trades: tuple[Any, ...], trade_plan: Any | None) -> str:
+    if not protective_trades:
+        return "stop_loss,take_profit"
+
+    missing: list[str] = []
+    for trade in protective_trades:
+        status = _managed_status(trade, trade_plan)
+        if status.status in ACTIVE_ORDER_STATUSES:
+            continue
+        order_type = status.order_type.upper()
+        if order_type in {"STP", "STOP"}:
+            missing.append("stop_loss")
+        elif order_type in {"LMT", "LIMIT"}:
+            missing.append("take_profit")
+        else:
+            missing.append(order_type or "unknown")
+
+    return ",".join(missing) if missing else "unknown"
+
+
+def _protection_failure_message(
+    active_trade: dict[str, Any],
+    *,
+    reason: str,
+    missing_protection: str,
+) -> str:
+    return _format_key_value_message(
+        "Entry exposure has no confirmed broker-side protection.",
+        {
+            "reason": reason,
+            "con_id": active_trade.get("product_con_id"),
+            "local_symbol": active_trade.get("product_local_symbol"),
+            "quantity": active_trade.get("filled"),
+            "fill_price": active_trade.get("avg_fill_price"),
+            "missing_order_type": missing_protection,
+            "manual_action": "Verify or create protective SL/TP in IB immediately.",
+        },
+    )
+
+
+def _protection_resubmitted_message(active_trade: dict[str, Any], *, reason: str) -> str:
+    return _format_key_value_message(
+        "Replacement broker-side protection was submitted after failure.",
+        {
+            "reason": reason,
+            "con_id": active_trade.get("product_con_id"),
+            "local_symbol": active_trade.get("product_local_symbol"),
+            "quantity": active_trade.get("filled"),
+            "fill_price": active_trade.get("avg_fill_price"),
+            "manual_action": "Emergency stop remains active; manually verify broker orders before resuming.",
+        },
+    )
+
+
+def _format_key_value_message(title: str, fields: dict[str, Any]) -> str:
+    lines = [title]
+    for key, value in fields.items():
+        if value is None or value == "":
+            continue
+        lines.append(f"{key}: {value}")
+    return "\n".join(lines)
 
 
 def _resolve_ib_client(ib_client: Any) -> Any:

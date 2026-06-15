@@ -57,13 +57,16 @@ class EmergencyStop:
         current_state = state if state is not None else self._state_store.load()
         already_active = current_state.emergency_stop
 
-        current_state.emergency_stop = True
-        current_state.active_trade = {
-            **current_state.active_trade,
-            "emergency_stop_reason": reason_text,
-            "emergency_stop_activated_at": activated_at,
-        }
-        self._state_store.save(current_state)
+        def update(locked_state: BotState) -> BotState:
+            locked_state.emergency_stop = True
+            locked_state.active_trade = {
+                **locked_state.active_trade,
+                "emergency_stop_reason": reason_text,
+                "emergency_stop_activated_at": activated_at,
+            }
+            return locked_state
+
+        current_state = self._state_store.transaction(update)
 
         if not already_active:
             self._logger.critical("Emergency stop activated. reason=%s", reason_text)

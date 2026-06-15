@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +13,7 @@ from typing import Any
 
 from config.settings import AppSettings, load_settings
 from data.candle_store import CandleStore
-from data.market_data import MarketDataClient
+from data.market_data import HistoricalDataRequest, MarketDataClient
 from domain.constants import (
     ALERT_ONLY_MODE,
     EXECUTION_SIDE_LONG,
@@ -54,6 +54,9 @@ class RuntimeRecovery:
     state: BotState
 
 
+MAX_SESSION_CANDLES = 1000
+
+
 def main() -> int:
     args = _parse_args()
 
@@ -89,6 +92,7 @@ class BotRunner:
         )
         self.emergency_stop = EmergencyStop(self.state_store, notifier=self.notifier, journal=self.journal)
         self.ib_connection = IBConnection(self.settings)
+        self._candle_store: CandleStore | None = None
 
         _validate_mode_startup(self.settings)
 
@@ -291,15 +295,15 @@ class BotRunner:
         return asyncio.create_task(monitor.run_forever(), name="active-trade-monitor")
 
     async def _run_cycle(self, *, ib: Any, signal_contract: Any, state: BotState) -> BotState:
-        candles = await MarketDataClient(ib, settings=self.settings.market_data).fetch_historical_bars(signal_contract)
-        candle_store = CandleStore(
-            latest_processed_candle_ts=state.last_processed_candle_ts,
-            bar_size=self.settings.market_data.bar_size,
+        candle_store, update, request_scope = await self._fetch_and_update_candle_store(
+            ib=ib,
+            signal_contract=signal_contract,
+            state=state,
         )
-        update = candle_store.update(candles)
 
         self.logger.info(
-            "Candle store updated. rows_received=%s rows_stored=%s latest_closed=%s gaps=%s",
+            "Candle store updated. request_scope=%s rows_received=%s rows_stored=%s latest_closed=%s gaps=%s",
+            request_scope,
             update.rows_received,
             update.rows_stored,
             update.latest_closed_candle_ts,
@@ -342,6 +346,35 @@ class BotRunner:
             return state
 
         raise BotRunnerError(f"Unsupported trading mode during cycle: {self.settings.trading.mode}")
+
+    async def _fetch_and_update_candle_store(
+        self,
+        *,
+        ib: Any,
+        signal_contract: Any,
+        state: BotState,
+    ) -> tuple[CandleStore, Any, str]:
+        if getattr(self, "_candle_store", None) is None:
+            candles = await MarketDataClient(ib, settings=self.settings.market_data).fetch_historical_bars(
+                signal_contract
+            )
+            self._candle_store = CandleStore(
+                latest_processed_candle_ts=state.last_processed_candle_ts,
+                bar_size=self.settings.market_data.bar_size,
+            )
+            update = self._candle_store.update(candles)
+            self._candle_store.trim_to_latest(MAX_SESSION_CANDLES)
+            return self._candle_store, update, "warmup"
+
+        delta_duration = _runtime_delta_duration(self.settings)
+        delta_settings = _market_data_settings_with_duration(self.settings.market_data, delta_duration)
+        candles = await MarketDataClient(ib, settings=delta_settings).fetch_historical_bars(
+            signal_contract,
+            request=HistoricalDataRequest(duration_str=delta_duration),
+        )
+        update = self._candle_store.update(candles)
+        self._candle_store.trim_to_latest(MAX_SESSION_CANDLES)
+        return self._candle_store, update, "delta"
 
     def _calculate_latest_signal(self, candle_store: CandleStore, state: BotState) -> Signal | None:
         indicators = add_indicators(
@@ -575,6 +608,21 @@ def _required_active_trade_int(active_trade: dict[str, Any], name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise BotRunnerError(f"Active trade {name} must be a positive integer for runtime recovery.")
     return value
+
+
+def _runtime_delta_duration(settings: Any) -> str:
+    poll_seconds = int(getattr(getattr(settings, "runtime", None), "poll_seconds", 300) or 300)
+    hours = max(6, int(poll_seconds // 3600) + 3)
+    return f"{hours} H"
+
+
+def _market_data_settings_with_duration(source: Any, duration: str) -> Any:
+    if is_dataclass(source):
+        return replace(source, historical_duration=duration)
+
+    values = dict(vars(source))
+    values["historical_duration"] = duration
+    return SimpleNamespace(**values)
 
 
 def _safe_notify(notifier: Any, method_name: str, *args: Any, **kwargs: Any) -> None:
