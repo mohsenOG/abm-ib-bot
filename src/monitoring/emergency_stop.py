@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from domain.constants import PROTECTED_TRADING_MODES
 from logging_setup.logger import get_logger
 from state.state_store import BotState, StateStore
 from trade_journal.journal import TradeJournal
@@ -31,10 +32,12 @@ class EmergencyStop:
         *,
         notifier: Any | None = None,
         journal: TradeJournal | None = None,
+        settings: Any | None = None,
     ) -> None:
         self._state_store = state_store
         self._notifier = notifier
         self._journal = journal
+        self._settings = settings
         self._logger = get_logger("monitoring.emergency_stop")
 
     def is_active(self, state: BotState | None = None) -> bool:
@@ -99,7 +102,17 @@ class EmergencyStop:
 
         method = getattr(self._notifier, "send_emergency_stop", None)
         if callable(method):
-            method(reason=reason)
+            result = method(reason=reason)
+            attempted = bool(getattr(result, "attempted", False))
+            success = bool(getattr(result, "success", True))
+            failed_count = getattr(result, "failed_count", None)
+            if not attempted and _notification_delivery_required(self._settings):
+                self._logger.error("Emergency stop notification was not attempted.")
+                raise EmergencyStopError("Required emergency stop notification was not attempted.")
+            if attempted and not success:
+                self._logger.error("Emergency stop notification delivery failed. failed_count=%s", failed_count)
+                if _notification_delivery_required(self._settings):
+                    raise EmergencyStopError("Required emergency stop notification delivery failed.")
 
     def _journal_event(self, reason: str, activated_at: str) -> None:
         if self._journal is None:
@@ -117,3 +130,13 @@ def _required_reason(reason: str) -> str:
     if not isinstance(reason, str) or not reason.strip():
         raise EmergencyStopError("Emergency stop reason is required.")
     return reason.strip()
+
+
+def _notification_delivery_required(settings: Any | None) -> bool:
+    if settings is None:
+        return False
+    telegram_settings = getattr(settings, "telegram", None)
+    if not bool(getattr(telegram_settings, "require_critical_delivery", True)):
+        return False
+    trading_mode = getattr(getattr(settings, "trading", None), "mode", None)
+    return trading_mode in PROTECTED_TRADING_MODES

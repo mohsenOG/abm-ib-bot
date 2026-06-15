@@ -18,6 +18,7 @@ from domain.constants import (
     ORDER_STATUS_REJECTED,
     ORDER_STATUS_SUBMITTED,
     PAPER_MODE,
+    PROTECTED_TRADING_MODES,
     TRADE_STATUS_CLOSED,
     TERMINAL_ORDER_STATUSES,
 )
@@ -887,7 +888,13 @@ class OrderManager:
             return
         method = getattr(self._notifier, "send_critical_error", None)
         if callable(method):
-            method(message=message, details=details)
+            result = method(message=message, details=details)
+            _raise_on_required_notification_failure(
+                result,
+                "send_critical_error",
+                settings=self._settings,
+                logger=self._logger,
+            )
 
     def _cancel_orders(self, ib: Any, trades: tuple[Any, ...]) -> None:
         cancel_order = getattr(ib, "cancelOrder", None)
@@ -1183,6 +1190,8 @@ class OrderManager:
             _safe_notify(
                 self._notifier,
                 "send_order_submitted",
+                settings=self._settings,
+                logger=self._logger,
                 order_id=status.order_id,
                 side=side,
                 quantity=status.total_quantity,
@@ -1192,6 +1201,8 @@ class OrderManager:
             _safe_notify(
                 self._notifier,
                 "send_fill",
+                settings=self._settings,
+                logger=self._logger,
                 order_id=status.order_id,
                 perm_id=status.perm_id,
                 side=side,
@@ -1202,6 +1213,8 @@ class OrderManager:
             _safe_notify(
                 self._notifier,
                 "send_fill",
+                settings=self._settings,
+                logger=self._logger,
                 order_id=status.order_id,
                 perm_id=status.perm_id,
                 side=side,
@@ -1209,9 +1222,23 @@ class OrderManager:
                 price=status.avg_fill_price,
             )
         elif status.status == ORDER_STATUS_CANCELLED:
-            _safe_notify(self._notifier, "send_order_cancelled", order_id=status.order_id, reason="Order cancelled.")
+            _safe_notify(
+                self._notifier,
+                "send_order_cancelled",
+                settings=self._settings,
+                logger=self._logger,
+                order_id=status.order_id,
+                reason="Order cancelled.",
+            )
         elif status.status in {ORDER_STATUS_INACTIVE, ORDER_STATUS_REJECTED}:
-            _safe_notify(self._notifier, "send_order_rejected", order_id=status.order_id, reason=status.status)
+            _safe_notify(
+                self._notifier,
+                "send_order_rejected",
+                settings=self._settings,
+                logger=self._logger,
+                order_id=status.order_id,
+                reason=status.status,
+            )
 
     def _attach_trade_event_handlers(self, trade: Any, trade_plan: Any, state: BotState | None) -> None:
         """Attach event handlers to persist order updates from ib_async Trade events."""
@@ -1542,10 +1569,70 @@ def _positive_float_setting(source: Any, name: str) -> float:
     return result
 
 
-def _safe_notify(notifier: Any, method_name: str, **kwargs: Any) -> None:
+def _safe_notify(
+    notifier: Any,
+    method_name: str,
+    *,
+    settings: Any | None = None,
+    logger: Any | None = None,
+    **kwargs: Any,
+) -> None:
     method = getattr(notifier, method_name, None)
-    if callable(method):
-        method(**kwargs)
+    if not callable(method):
+        if _notification_delivery_required(settings, method_name):
+            raise OrderManagerError(f"Required notification method is unavailable: {method_name}.")
+        return
+
+    try:
+        result = method(**kwargs)
+    except Exception as exc:
+        if logger is not None:
+            logger.exception("Notification method failed. method=%s", method_name)
+        if _notification_delivery_required(settings, method_name):
+            raise OrderManagerError(f"Required notification failed: {method_name}: {exc}") from exc
+        return
+
+    _raise_on_required_notification_failure(result, method_name, settings=settings, logger=logger)
+
+
+def _raise_on_required_notification_failure(
+    result: Any,
+    method_name: str,
+    *,
+    settings: Any | None,
+    logger: Any | None = None,
+) -> None:
+    attempted = bool(getattr(result, "attempted", False))
+    success = bool(getattr(result, "success", True))
+    failed_count = getattr(result, "failed_count", None)
+    if not attempted:
+        message = f"Required notification was not attempted. method={method_name}"
+        if logger is not None:
+            logger.error(message)
+        if _notification_delivery_required(settings, method_name):
+            raise OrderManagerError(message)
+        return
+
+    if success:
+        return
+
+    message = f"Notification delivery failed. method={method_name} failed_count={failed_count}"
+    if logger is not None:
+        logger.error(message)
+    if _notification_delivery_required(settings, method_name):
+        raise OrderManagerError(message)
+
+
+def _notification_delivery_required(settings: Any | None, method_name: str) -> bool:
+    if settings is None:
+        return False
+    telegram_settings = getattr(settings, "telegram", None)
+    if not bool(getattr(telegram_settings, "require_critical_delivery", True)):
+        return False
+    trading_mode = getattr(getattr(settings, "trading", None), "mode", None)
+    if trading_mode not in PROTECTED_TRADING_MODES:
+        return False
+    return method_name in {"send_order_submitted", "send_fill", "send_critical_error", "send_emergency_stop"}
 
 
 def _positive_float_attr(source: Any, name: str) -> float:

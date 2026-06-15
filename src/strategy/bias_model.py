@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from strategy.indicators import required_indicator_warmup_bars
+
 
 AGENT_COUNT = 21
 
@@ -113,6 +115,13 @@ def _prepare_indicators(indicators: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(indicators, pd.DataFrame):
         raise BiasModelError("Indicators must be provided as a pandas DataFrame.")
 
+    minimum_rows = required_indicator_warmup_bars()
+    if len(indicators) < minimum_rows:
+        raise BiasModelError(
+            f"Indicator warmup is incomplete: {len(indicators)} closed bars available; "
+            f"{minimum_rows} required before bias calculation."
+        )
+
     missing_columns = [column for column in REQUIRED_COLUMNS if column not in indicators.columns]
     if missing_columns:
         missing = ", ".join(missing_columns)
@@ -121,6 +130,11 @@ def _prepare_indicators(indicators: pd.DataFrame) -> pd.DataFrame:
     result = indicators.copy()
     for column in REQUIRED_COLUMNS:
         result[column] = pd.to_numeric(result[column], errors="raise")
+
+    latest_missing = [column for column in REQUIRED_COLUMNS if pd.isna(result[column].iloc[-1])]
+    if latest_missing:
+        missing = ", ".join(latest_missing)
+        raise BiasModelError(f"Latest indicator row is incomplete after warmup: {missing}.")
 
     return result
 

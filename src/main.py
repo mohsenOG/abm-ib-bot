@@ -37,14 +37,22 @@ from monitoring.reconciliation import AccountReconciliationError, AccountReconci
 from notifications.notifier import TelegramNotifier
 from risk.risk_manager import RiskManager, TradePlan
 from state.state_store import BotState, StateStore
-from strategy.bias_model import calculate_bias
-from strategy.indicators import add_indicators
-from strategy.signals import Signal, generate_signal
+from strategy.bias_model import BiasModelError, calculate_bias
+from strategy.indicators import IndicatorError, add_indicators, required_indicator_warmup_bars
+from strategy.signals import Signal, SignalEngineError, generate_signal
 from trade_journal.journal import TradeJournal
 
 
 class BotRunnerError(RuntimeError):
     """Raised when the main runner cannot continue safely."""
+
+
+class StrategySignalNotReadyError(RuntimeError):
+    """Raised when candle history is not ready for safe signal calculation."""
+
+
+class NotificationDeliveryError(RuntimeError):
+    """Raised when a required notification cannot be delivered."""
 
 
 @dataclass(frozen=True)
@@ -55,6 +63,15 @@ class RuntimeRecovery:
 
 
 MAX_SESSION_CANDLES = 1000
+CRITICAL_NOTIFICATION_METHODS = frozenset(
+    {
+        "send_startup",
+        "send_order_submitted",
+        "send_fill",
+        "send_emergency_stop",
+        "send_critical_error",
+    }
+)
 
 
 def main() -> int:
@@ -90,7 +107,12 @@ class BotRunner:
             repeated_error_limit=self.settings.health.repeated_error_limit,
             notifier=self.notifier,
         )
-        self.emergency_stop = EmergencyStop(self.state_store, notifier=self.notifier, journal=self.journal)
+        self.emergency_stop = EmergencyStop(
+            self.state_store,
+            notifier=self.notifier,
+            journal=self.journal,
+            settings=self.settings,
+        )
         self.ib_connection = IBConnection(self.settings)
         self._candle_store: CandleStore | None = None
 
@@ -101,11 +123,11 @@ class BotRunner:
 
         state = self.state_store.load()
         self.logger.info("Bot starting. mode=%s once=%s", self.settings.trading.mode, once)
-        _safe_notify(self.notifier, "send_startup", f"Bot started. mode={self.settings.trading.mode}")
+        await self._notify("send_startup", f"Bot started. mode={self.settings.trading.mode}", critical=True)
 
         try:
             ib = await self.ib_connection.connect()
-            _safe_notify(self.notifier, "send_ib_connected")
+            await self._notify("send_ib_connected")
 
             await self._run_account_guard(ib=ib, state=state)
             signal_contract = await qualify_contract(ib, build_signal_contract(self.settings))
@@ -134,8 +156,7 @@ class BotRunner:
                 except Exception:
                     error_check = self.health_monitor.record_error()
                     self.logger.exception("Bot cycle failed. repeated_errors=%s", self.health_monitor.repeated_errors)
-                    _safe_notify(
-                        self.notifier,
+                    await self._notify(
                         "send_critical_error",
                         message="Runtime recovery started",
                         details=(
@@ -158,8 +179,7 @@ class BotRunner:
                     state = recovery.state
                     self.health_monitor.clear_errors()
                     monitor_task = self._create_active_trade_monitor_task(ib=ib, once=once)
-                    _safe_notify(
-                        self.notifier,
+                    await self._notify(
                         "send_critical_error",
                         message="Runtime recovery completed",
                         details="IB session, account guard, reconciliation, contracts, and market data refreshed.",
@@ -196,8 +216,7 @@ class BotRunner:
                 )
                 await asyncio.sleep(delay_seconds)
 
-            _safe_notify(
-                self.notifier,
+            await self._notify(
                 "send_critical_error",
                 message="Runtime recovery attempt",
                 details=f"attempt={attempt}/{max_attempts}; cause={cause}",
@@ -205,7 +224,7 @@ class BotRunner:
 
             try:
                 ib = await self.ib_connection.reconnect()
-                _safe_notify(self.notifier, "send_ib_connected", "IB reconnected during runtime recovery")
+                await self._notify("send_ib_connected", "IB reconnected during runtime recovery")
 
                 recovered_state = self.state_store.load()
                 await self._run_recovery_account_checks(ib=ib, state=recovered_state)
@@ -230,8 +249,7 @@ class BotRunner:
                     attempt,
                     max_attempts,
                 )
-                _safe_notify(
-                    self.notifier,
+                await self._notify(
                     "send_critical_error",
                     message="Runtime recovery attempt failed",
                     details=f"attempt={attempt}/{max_attempts}; error={exc}",
@@ -319,7 +337,22 @@ class BotRunner:
             self._run_health_checks(ib=ib, state=state, latest_market_data_ts=update.latest_closed_candle_ts)
             return state
 
-        signal = self._calculate_latest_signal(candle_store, state)
+        try:
+            signal = self._calculate_latest_signal(candle_store, state)
+        except StrategySignalNotReadyError as exc:
+            latest_closed_ts = candle_store.latest_closed_candle_ts
+            self.logger.warning("Signal processing blocked until warmup is complete. reason=%s", exc)
+            await self._notify(
+                "send_critical_error",
+                message="Strategy warmup blocked signal processing",
+                details=str(exc),
+            )
+            if latest_closed_ts is not None:
+                candle_store.mark_processed(latest_closed_ts)
+                state.last_processed_candle_ts = latest_closed_ts.isoformat()
+            self.state_store.save(state)
+            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_closed_ts)
+            return state
         latest_closed_ts = candle_store.latest_closed_candle_ts
 
         if latest_closed_ts is not None:
@@ -332,7 +365,7 @@ class BotRunner:
             self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_closed_ts)
             return state
 
-        self._record_signal(signal)
+        await self._record_signal(signal)
 
         if self.settings.trading.mode == ALERT_ONLY_MODE:
             state.last_signal_id = signal.signal_id
@@ -377,23 +410,33 @@ class BotRunner:
         return self._candle_store, update, "delta"
 
     def _calculate_latest_signal(self, candle_store: CandleStore, state: BotState) -> Signal | None:
-        indicators = add_indicators(
-            candle_store.get_candles(),
-            use_heikin_ashi=self.settings.strategy.use_heikin_ashi,
-            atr_period=self.settings.strategy.atr_length,
-        )
-        biased_data = calculate_bias(indicators)
-        return generate_signal(
-            biased_data,
-            self.settings.strategy.bias_threshold,
-            last_signal_id=state.last_signal_id,
-            underlying_symbol=self.settings.signal_instrument.symbol,
-            atr_length=self.settings.strategy.atr_length,
-            sl_atr_mult=self.settings.strategy.sl_atr_mult,
-            tp_atr_mult=self.settings.strategy.tp_atr_mult,
-        )
+        candles = candle_store.get_candles()
+        minimum_rows = required_indicator_warmup_bars(atr_period=self.settings.strategy.atr_length)
+        if len(candles) < minimum_rows:
+            raise StrategySignalNotReadyError(
+                f"{len(candles)} closed bars available; {minimum_rows} required before signal calculation."
+            )
 
-    def _record_signal(self, signal: Signal) -> None:
+        try:
+            indicators = add_indicators(
+                candles,
+                use_heikin_ashi=self.settings.strategy.use_heikin_ashi,
+                atr_period=self.settings.strategy.atr_length,
+            )
+            biased_data = calculate_bias(indicators)
+            return generate_signal(
+                biased_data,
+                self.settings.strategy.bias_threshold,
+                last_signal_id=state.last_signal_id,
+                underlying_symbol=self.settings.signal_instrument.symbol,
+                atr_length=self.settings.strategy.atr_length,
+                sl_atr_mult=self.settings.strategy.sl_atr_mult,
+                tp_atr_mult=self.settings.strategy.tp_atr_mult,
+            )
+        except (IndicatorError, BiasModelError, SignalEngineError) as exc:
+            raise StrategySignalNotReadyError(str(exc)) from exc
+
+    async def _record_signal(self, signal: Signal) -> None:
         self.logger.info("Signal generated. signal_id=%s side=%s price=%s", signal.signal_id, signal.side, signal.price)
         self.journal.record(
             "signal",
@@ -403,8 +446,7 @@ class BotRunner:
             price=signal.price,
             raw_json=asdict(signal),
         )
-        _safe_notify(
-            self.notifier,
+        await self._notify(
             "send_signal",
             signal_id=signal.signal_id,
             side=signal.side,
@@ -423,7 +465,7 @@ class BotRunner:
             reason = str(exc)
             self.logger.info("Product selection blocked signal. signal_id=%s reason=%s", signal.signal_id, reason)
             self.journal.record("risk_blocked", signal_id=signal.signal_id, side=signal.side, reason=reason)
-            _safe_notify(self.notifier, "send_risk_blocked", signal_id=signal.signal_id, reason=reason)
+            await self._notify("send_risk_blocked", signal_id=signal.signal_id, reason=reason)
             state.last_signal_id = signal.signal_id
             self.state_store.save(state)
             return state
@@ -440,7 +482,7 @@ class BotRunner:
             reason = risk_decision.reason or "Risk manager blocked the trade."
             self.logger.info("Risk blocked signal. signal_id=%s reason=%s", signal.signal_id, reason)
             self.journal.record("risk_blocked", signal_id=signal.signal_id, side=signal.side, reason=reason)
-            _safe_notify(self.notifier, "send_risk_blocked", signal_id=signal.signal_id, reason=reason)
+            await self._notify("send_risk_blocked", signal_id=signal.signal_id, reason=reason)
             state.last_signal_id = signal.signal_id
             self.state_store.save(state)
             return state
@@ -522,18 +564,49 @@ class BotRunner:
             self.logger.error("Health check critical. level=%s", report.level)
         return report
 
+    async def _notify(self, method_name: str, *args: Any, critical: bool = False, **kwargs: Any) -> None:
+        await asyncio.to_thread(
+            _safe_notify,
+            self.notifier,
+            method_name,
+            *args,
+            required=self._requires_notification_delivery(method_name, critical=critical),
+            logger=self.logger,
+            **kwargs,
+        )
+
+    def _notify_now(self, method_name: str, *args: Any, critical: bool = False, **kwargs: Any) -> None:
+        _safe_notify(
+            self.notifier,
+            method_name,
+            *args,
+            required=self._requires_notification_delivery(method_name, critical=critical),
+            logger=self.logger,
+            **kwargs,
+        )
+
+    def _requires_notification_delivery(self, method_name: str, *, critical: bool = False) -> bool:
+        telegram_settings = getattr(self.settings, "telegram", None)
+        require_delivery = bool(getattr(telegram_settings, "require_critical_delivery", True))
+        if not require_delivery:
+            return False
+        if self.settings.trading.mode not in PROTECTED_TRADING_MODES:
+            return False
+        return critical or method_name in CRITICAL_NOTIFICATION_METHODS
+
     def _handle_critical_error(self, exc: Exception) -> None:
         self.logger.exception("Critical bot error.")
         self.journal.record("critical_error", reason=str(exc), raw_json={"error_type": type(exc).__name__})
-        _safe_notify(self.notifier, "send_critical_error", details=str(exc))
+        with suppress(NotificationDeliveryError):
+            self._notify_now("send_critical_error", details=str(exc), critical=True)
 
     def _shutdown(self) -> None:
         try:
             if self.ib_connection.is_connected():
                 self.ib_connection.disconnect()
-                _safe_notify(self.notifier, "send_ib_disconnected")
+                self._notify_now("send_ib_disconnected")
         finally:
-            _safe_notify(self.notifier, "send_shutdown", "Bot stopped")
+            self._notify_now("send_shutdown", "Bot stopped")
             self.logger.info("Bot stopped.")
 
 
@@ -625,10 +698,48 @@ def _market_data_settings_with_duration(source: Any, duration: str) -> Any:
     return SimpleNamespace(**values)
 
 
-def _safe_notify(notifier: Any, method_name: str, *args: Any, **kwargs: Any) -> None:
+def _safe_notify(
+    notifier: Any,
+    method_name: str,
+    *args: Any,
+    required: bool = False,
+    logger: Any | None = None,
+    **kwargs: Any,
+) -> None:
     method = getattr(notifier, method_name, None)
-    if callable(method):
-        method(*args, **kwargs)
+    if not callable(method):
+        if required:
+            raise NotificationDeliveryError(f"Required notification method is unavailable: {method_name}.")
+        return
+
+    try:
+        result = method(*args, **kwargs)
+    except Exception as exc:
+        if logger is not None:
+            logger.exception("Notification method failed. method=%s", method_name)
+        if required:
+            raise NotificationDeliveryError(f"Required notification failed: {method_name}: {exc}") from exc
+        return
+
+    attempted = bool(getattr(result, "attempted", False))
+    success = bool(getattr(result, "success", True))
+    failed_count = getattr(result, "failed_count", None)
+    if not attempted:
+        message = f"Required notification was not attempted. method={method_name}"
+        if logger is not None:
+            logger.error(message)
+        if required:
+            raise NotificationDeliveryError(message)
+        return
+
+    if success:
+        return
+
+    message = f"Notification delivery failed. method={method_name} failed_count={failed_count}"
+    if logger is not None:
+        logger.error(message)
+    if required:
+        raise NotificationDeliveryError(message)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,23 @@ ROC_PERIODS = (13, 27)
 BREAKOUT_PERIODS = (5, 17, 21)
 
 
+def required_indicator_warmup_bars(*, atr_period: int = DEFAULT_STRATEGY_ATR_LENGTH) -> int:
+    """Return the minimum closed candles needed before signal calculations are meaningful."""
+
+    _validate_positive_period(atr_period, "atr_period")
+    macd_warmups = tuple(slow_period + signal_period - 1 for _, slow_period, signal_period in MACD_PERIODS)
+    return max(
+        max(EMA_PERIODS),
+        max(SMA_PERIODS),
+        RSI_PERIOD,
+        max(macd_warmups),
+        BOLLINGER_PERIOD,
+        max(ROC_PERIODS) + 1,
+        max(BREAKOUT_PERIODS) + 1,
+        atr_period,
+    )
+
+
 class IndicatorError(ValueError):
     """Raised when indicators cannot be calculated safely."""
 

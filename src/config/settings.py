@@ -15,6 +15,7 @@ from config.defaults import (
     DEFAULT_STRATEGY_USE_HEIKIN_ASHI,
     DEFAULT_TELEGRAM_ENABLED,
     DEFAULT_TELEGRAM_MAX_RETRIES,
+    DEFAULT_TELEGRAM_REQUIRE_CRITICAL_DELIVERY,
     DEFAULT_TELEGRAM_RETRY_DELAY_SECONDS,
     DEFAULT_TELEGRAM_TIMEOUT_SECONDS,
 )
@@ -71,6 +72,7 @@ class TelegramSettings:
     max_retries: int
     retry_delay_seconds: float
     timeout_seconds: float
+    require_critical_delivery: bool
 
 
 @dataclass(frozen=True)
@@ -352,6 +354,12 @@ def _load_telegram(raw: dict[str, Any]) -> TelegramSettings:
         "telegram.timeout_seconds",
         DEFAULT_TELEGRAM_TIMEOUT_SECONDS,
     )
+    require_critical_delivery = _optional_bool(
+        section,
+        "require_critical_delivery",
+        "telegram.require_critical_delivery",
+        DEFAULT_TELEGRAM_REQUIRE_CRITICAL_DELIVERY,
+    )
 
     if max_retries < 0:
         raise SettingsValidationError("telegram.max_retries must be zero or greater.")
@@ -370,6 +378,7 @@ def _load_telegram(raw: dict[str, Any]) -> TelegramSettings:
             max_retries=max_retries,
             retry_delay_seconds=retry_delay_seconds,
             timeout_seconds=timeout_seconds,
+            require_critical_delivery=require_critical_delivery,
         )
 
     bot_token = _required_env_string("TELEGRAM_BOT_TOKEN")
@@ -386,6 +395,7 @@ def _load_telegram(raw: dict[str, Any]) -> TelegramSettings:
         max_retries=max_retries,
         retry_delay_seconds=retry_delay_seconds,
         timeout_seconds=timeout_seconds,
+        require_critical_delivery=require_critical_delivery,
     )
 
 

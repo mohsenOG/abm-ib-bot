@@ -21,6 +21,7 @@ telegram:
   max_retries: 3
   retry_delay_seconds: 2
   timeout_seconds: 10
+  require_critical_delivery: true
 
 signal_instrument:
   asset_class: CMDTY

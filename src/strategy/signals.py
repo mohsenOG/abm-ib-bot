@@ -125,6 +125,16 @@ def _prepare_biased_data(biased_data: pd.DataFrame, atr_column: str) -> pd.DataF
 
     result = result.drop_duplicates(subset=[CANDLE_TIMESTAMP], keep="last")
     result = result.sort_values(CANDLE_TIMESTAMP).reset_index(drop=True)
+
+    if result.empty:
+        raise SignalEngineError("Biased DataFrame contains no rows.")
+
+    checked_columns = (CANDLE_CLOSE, "bias", "confidence", atr_column)
+    latest_missing = [column for column in checked_columns if pd.isna(result[column].iloc[-1])]
+    if latest_missing:
+        missing = ", ".join(latest_missing)
+        raise SignalEngineError(f"Latest signal row is incomplete after warmup: {missing}.")
+
     return result
 
 
