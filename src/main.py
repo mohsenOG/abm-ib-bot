@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from config.settings import AppSettings, load_settings
@@ -44,6 +45,13 @@ from trade_journal.journal import TradeJournal
 
 class BotRunnerError(RuntimeError):
     """Raised when the main runner cannot continue safely."""
+
+
+@dataclass(frozen=True)
+class RuntimeRecovery:
+    ib: Any
+    signal_contract: Any
+    state: BotState
 
 
 def main() -> int:
@@ -122,19 +130,152 @@ class BotRunner:
                 except Exception:
                     error_check = self.health_monitor.record_error()
                     self.logger.exception("Bot cycle failed. repeated_errors=%s", self.health_monitor.repeated_errors)
-                    if error_check.level == "critical":
-                        self.emergency_stop.activate("Repeated bot cycle errors reached the configured limit.", state=state)
-                    raise
+                    _safe_notify(
+                        self.notifier,
+                        "send_critical_error",
+                        message="Runtime recovery started",
+                        details=(
+                            f"Bot cycle failed; signal processing is paused. "
+                            f"repeated_errors={self.health_monitor.repeated_errors} level={error_check.level}"
+                        ),
+                    )
+                    monitor_task = await self._cancel_active_trade_monitor_task(monitor_task)
+
+                    try:
+                        recovery = await self._recover_runtime(state=state, cause=error_check.message)
+                    except Exception as recovery_exc:
+                        reason = f"Runtime recovery failed closed: {recovery_exc}"
+                        self.logger.exception("Runtime recovery failed closed.")
+                        self.emergency_stop.activate(reason, state=state)
+                        raise BotRunnerError(reason) from recovery_exc
+
+                    ib = recovery.ib
+                    signal_contract = recovery.signal_contract
+                    state = recovery.state
+                    self.health_monitor.clear_errors()
+                    monitor_task = self._create_active_trade_monitor_task(ib=ib, once=once)
+                    _safe_notify(
+                        self.notifier,
+                        "send_critical_error",
+                        message="Runtime recovery completed",
+                        details="IB session, account guard, reconciliation, contracts, and market data refreshed.",
+                    )
 
                 if once:
                     return
 
                 await asyncio.sleep(self.settings.runtime.poll_seconds)
         finally:
-            if monitor_task is not None:
-                monitor_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await monitor_task
+            await self._cancel_active_trade_monitor_task(monitor_task)
+
+    async def _cancel_active_trade_monitor_task(self, monitor_task: asyncio.Task[Any] | None) -> None:
+        if monitor_task is None:
+            return None
+
+        monitor_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await monitor_task
+        return None
+
+    async def _recover_runtime(self, *, state: BotState, cause: str) -> RuntimeRecovery:
+        max_attempts = max(1, self.health_monitor.repeated_error_limit)
+        last_error: Exception | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            if attempt > 1:
+                delay_seconds = min(60.0, float(2 ** (attempt - 2)))
+                self.logger.warning(
+                    "Runtime recovery backing off. attempt=%s/%s delay_seconds=%s",
+                    attempt,
+                    max_attempts,
+                    delay_seconds,
+                )
+                await asyncio.sleep(delay_seconds)
+
+            _safe_notify(
+                self.notifier,
+                "send_critical_error",
+                message="Runtime recovery attempt",
+                details=f"attempt={attempt}/{max_attempts}; cause={cause}",
+            )
+
+            try:
+                ib = await self.ib_connection.reconnect()
+                _safe_notify(self.notifier, "send_ib_connected", "IB reconnected during runtime recovery")
+
+                recovered_state = self.state_store.load()
+                await self._run_recovery_account_checks(ib=ib, state=recovered_state)
+                signal_contract = await qualify_contract(ib, build_signal_contract(self.settings))
+                await self._requalify_active_product_contract(ib=ib, state=recovered_state)
+                latest_market_data_ts = await self._refresh_recovery_candle_delta(
+                    ib=ib,
+                    signal_contract=signal_contract,
+                    state=recovered_state,
+                )
+                health_report = self._run_health_checks(
+                    ib=ib,
+                    state=recovered_state,
+                    latest_market_data_ts=latest_market_data_ts,
+                )
+                if health_report.critical:
+                    raise BotRunnerError(f"Runtime recovery health check failed: {health_report.level}.")
+            except Exception as exc:
+                last_error = exc
+                self.logger.exception(
+                    "Runtime recovery attempt failed. attempt=%s/%s",
+                    attempt,
+                    max_attempts,
+                )
+                _safe_notify(
+                    self.notifier,
+                    "send_critical_error",
+                    message="Runtime recovery attempt failed",
+                    details=f"attempt={attempt}/{max_attempts}; error={exc}",
+                )
+                continue
+
+            self.logger.info("Runtime recovery completed. attempt=%s/%s", attempt, max_attempts)
+            return RuntimeRecovery(ib=ib, signal_contract=signal_contract, state=recovered_state)
+
+        raise BotRunnerError(f"Runtime recovery exhausted {max_attempts} attempt(s): {last_error}") from last_error
+
+    async def _run_recovery_account_checks(self, *, ib: Any, state: BotState) -> None:
+        account_snapshot = await AccountReader(ib, client_id=self.settings.ib.client_id).read_snapshot()
+        try:
+            AccountGuard(self.settings).run_startup_checks(account_snapshot=account_snapshot)
+            AccountReconciliationGate().run_startup_checks(account_snapshot=account_snapshot, state=state)
+        except (AccountGuardError, AccountReconciliationError) as exc:
+            raise BotRunnerError(f"IB account recovery safety check failed: {exc}.") from exc
+
+    async def _requalify_active_product_contract(self, *, ib: Any, state: BotState) -> Any | None:
+        active_trade = state.active_trade
+        if not active_trade or active_trade.get("product_con_id") is None:
+            return None
+
+        product = SimpleNamespace(
+            sec_type=_required_active_trade_text(active_trade, "product_asset_class"),
+            con_id=_required_active_trade_int(active_trade, "product_con_id"),
+            exchange=_required_active_trade_text(active_trade, "product_exchange"),
+            currency=_required_active_trade_text(active_trade, "product_currency"),
+        )
+        return await qualify_contract(ib, build_execution_product_contract(product))
+
+    async def _refresh_recovery_candle_delta(
+        self,
+        *,
+        ib: Any,
+        signal_contract: Any,
+        state: BotState,
+    ) -> Any | None:
+        candles = await MarketDataClient(ib, settings=self.settings.market_data).fetch_historical_bars(signal_contract)
+        candle_store = CandleStore(
+            latest_processed_candle_ts=state.last_processed_candle_ts,
+            bar_size=self.settings.market_data.bar_size,
+        )
+        update = candle_store.update(candles)
+        if update.gaps:
+            self.logger.warning("Runtime recovery candle refresh detected gaps. gaps=%s", len(update.gaps))
+        return update.latest_closed_candle_ts
 
     def _create_active_trade_monitor_task(self, *, ib: Any, once: bool) -> asyncio.Task[Any] | None:
         if once or self.settings.trading.mode != PAPER_MODE:
@@ -419,6 +560,20 @@ def _validate_configured_account_id(settings: AppSettings, mode: str) -> None:
 def _require_trade_plan(value: TradePlan | None) -> TradePlan:
     if value is None:
         raise BotRunnerError("Risk decision was approved without a trade plan.")
+    return value
+
+
+def _required_active_trade_text(active_trade: dict[str, Any], name: str) -> str:
+    value = active_trade.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise BotRunnerError(f"Active trade {name} is required for runtime recovery.")
+    return value.strip()
+
+
+def _required_active_trade_int(active_trade: dict[str, Any], name: str) -> int:
+    value = active_trade.get(name)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise BotRunnerError(f"Active trade {name} must be a positive integer for runtime recovery.")
     return value
 
 
