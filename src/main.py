@@ -289,7 +289,12 @@ class BotRunner:
         signal_contract: Any,
         state: BotState,
     ) -> Any | None:
-        candles = await MarketDataClient(ib, settings=self.settings.market_data).fetch_historical_bars(signal_contract)
+        delta_duration = _runtime_delta_duration(self.settings)
+        delta_settings = _market_data_settings_with_duration(self.settings.market_data, delta_duration)
+        candles = await MarketDataClient(ib, settings=delta_settings).fetch_historical_bars(
+            signal_contract,
+            request=HistoricalDataRequest(duration_str=delta_duration),
+        )
         candle_store = CandleStore(
             latest_processed_candle_ts=state.last_processed_candle_ts,
             bar_size=self.settings.market_data.bar_size,
