@@ -124,6 +124,7 @@ class BotRunner:
         env_file: str | Path | None = None,
     ) -> None:
         self.settings = load_settings(settings_file=settings_file, env_file=env_file)
+        _validate_mode_startup(self.settings)
         self.logger = setup_logging(self.settings)
         self.notifier = TelegramNotifier(self.settings, logger=get_logger("notifications.telegram"))
         self.state_store = StateStore(self.settings.paths.state_file)
@@ -146,8 +147,6 @@ class BotRunner:
         self._candle_store: CandleStore | None = None
         self._market_calendar: MarketCalendar | None = None
         self._market_calendar_refresh_date = None
-
-        _validate_mode_startup(self.settings)
 
     async def run(self, *, once: bool = False) -> None:
         """Start the bot runner."""
@@ -778,7 +777,7 @@ class BotRunner:
                 use_heikin_ashi=self.settings.strategy.use_heikin_ashi,
                 atr_period=self.settings.strategy.atr_length,
             )
-            biased_data = calculate_bias(indicators)
+            biased_data = calculate_bias(indicators, atr_period=self.settings.strategy.atr_length)
             return generate_signal(
                 biased_data,
                 self.settings.strategy.bias_threshold,

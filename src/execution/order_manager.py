@@ -22,13 +22,12 @@ from domain.constants import (
     TRADE_STATUS_CLOSED,
     TERMINAL_ORDER_STATUSES,
 )
-from config.defaults import DEFAULT_EXECUTION_ENTRY_ORDER_TYPE
 from logging_setup.logger import get_logger
 from monitoring.account_guard import account_guard_failures, configured_account_id
 from state.state_store import BotState, StateStore
 from trade_journal.journal import TradeJournal
 
-from execution.order_builder import BuiltOrderSet, EntryOrderType, OrderBuilder
+from execution.order_builder import BuiltOrderSet, EntryOrderType, MARKET_ENTRY_ORDER_TYPE, OrderBuilder
 
 
 JournalStatusEvent = Literal[
@@ -1554,9 +1553,9 @@ def _looks_like_ib_client(value: Any) -> bool:
 
 def _entry_order_type_setting(source: Any) -> EntryOrderType:
     value = getattr(source, "entry_order_type", None)
-    if value == DEFAULT_EXECUTION_ENTRY_ORDER_TYPE:
-        return DEFAULT_EXECUTION_ENTRY_ORDER_TYPE
-    raise OrderManagerError(f"execution.entry_order_type must be {DEFAULT_EXECUTION_ENTRY_ORDER_TYPE}.")
+    if value == MARKET_ENTRY_ORDER_TYPE:
+        return MARKET_ENTRY_ORDER_TYPE
+    raise OrderManagerError(f"execution.entry_order_type must be {MARKET_ENTRY_ORDER_TYPE}.")
 
 
 def _positive_float_setting(source: Any, name: str) -> float:

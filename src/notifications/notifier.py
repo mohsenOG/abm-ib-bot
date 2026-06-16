@@ -11,13 +11,6 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from config.defaults import (
-    DEFAULT_TELEGRAM_ENABLED,
-    DEFAULT_TELEGRAM_MAX_RETRIES,
-    DEFAULT_TELEGRAM_RETRY_DELAY_SECONDS,
-    DEFAULT_TELEGRAM_TIMEOUT_SECONDS,
-)
-
 TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 
 
@@ -52,29 +45,26 @@ class TelegramNotifier:
     ) -> None:
         telegram_settings = getattr(settings, "telegram", settings)
 
-        self.enabled = _resolve_setting(telegram_settings, "enabled", enabled, DEFAULT_TELEGRAM_ENABLED)
-        self.bot_token = _resolve_setting(telegram_settings, "bot_token", bot_token, None)
-        self.chat_ids = tuple(_resolve_setting(telegram_settings, "chat_ids", chat_ids, ()) or ())
-        self.max_retries = _resolve_setting(
+        self.enabled = _resolve_required_setting(telegram_settings, "enabled", enabled)
+        self.bot_token = _resolve_optional_setting(telegram_settings, "bot_token", bot_token)
+        self.chat_ids = tuple(_resolve_optional_setting(telegram_settings, "chat_ids", chat_ids) or ())
+        self.max_retries = _resolve_required_setting(
             telegram_settings,
             "max_retries",
             max_retries,
-            DEFAULT_TELEGRAM_MAX_RETRIES,
         )
         self.retry_delay_seconds = float(
-            _resolve_setting(
+            _resolve_required_setting(
                 telegram_settings,
                 "retry_delay_seconds",
                 retry_delay_seconds,
-                DEFAULT_TELEGRAM_RETRY_DELAY_SECONDS,
             )
         )
         self.timeout_seconds = float(
-            _resolve_setting(
+            _resolve_required_setting(
                 telegram_settings,
                 "timeout_seconds",
                 timeout_seconds,
-                DEFAULT_TELEGRAM_TIMEOUT_SECONDS,
             )
         )
         self.logger = logger or logging.getLogger(__name__)
@@ -296,12 +286,23 @@ def _format_message(title: str, **fields: Any) -> str:
     return "\n".join(lines)
 
 
-def _resolve_setting(settings: Any | None, name: str, override: Any | None, default: Any) -> Any:
+def _resolve_required_setting(settings: Any | None, name: str, override: Any | None) -> Any:
     if override is not None:
         return override
     if settings is None:
-        return default
-    return getattr(settings, name, default)
+        raise TelegramNotifierError(f"telegram.{name} is required.")
+    value = getattr(settings, name, None)
+    if value is None:
+        raise TelegramNotifierError(f"telegram.{name} is required.")
+    return value
+
+
+def _resolve_optional_setting(settings: Any | None, name: str, override: Any | None) -> Any:
+    if override is not None:
+        return override
+    if settings is None:
+        return None
+    return getattr(settings, name, None)
 
 
 def _extract_telegram_error(error: urllib.error.HTTPError) -> str:

@@ -9,16 +9,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from config.defaults import (
-    DEFAULT_EXECUTION_ENTRY_ORDER_TYPE,
-    DEFAULT_RUNTIME_ACTIVE_TRADE_MONITOR_SECONDS,
-    DEFAULT_STRATEGY_USE_HEIKIN_ASHI,
-    DEFAULT_TELEGRAM_ENABLED,
-    DEFAULT_TELEGRAM_MAX_RETRIES,
-    DEFAULT_TELEGRAM_REQUIRE_CRITICAL_DELIVERY,
-    DEFAULT_TELEGRAM_RETRY_DELAY_SECONDS,
-    DEFAULT_TELEGRAM_TIMEOUT_SECONDS,
-)
 from data.timeframes import SUPPORTED_BAR_SIZE_1_HOUR
 from domain.constants import EXECUTION_SIDE_LONG, EXECUTION_SIDE_SHORT, TRADING_MODES
 from ib_gateway.constants import (
@@ -28,7 +18,8 @@ from ib_gateway.constants import (
     USD_CURRENCY,
 )
 
-SUPPORTED_ENTRY_ORDER_TYPES = {DEFAULT_EXECUTION_ENTRY_ORDER_TYPE}
+MARKET_ENTRY_ORDER_TYPE = "market"
+SUPPORTED_ENTRY_ORDER_TYPES = {MARKET_ENTRY_ORDER_TYPE}
 
 
 class SettingsValidationError(ValueError):
@@ -320,9 +311,9 @@ def _load_market_data(raw: dict[str, Any]) -> MarketDataSettings:
 
 
 def _load_allowed_directions(section: dict[str, Any]) -> AllowedDirectionsSettings:
-    directions = _optional_section(section, "allowed_directions")
-    long_enabled = _optional_bool(directions, "long", "trading.allowed_directions.long", True)
-    short_enabled = _optional_bool(directions, "short", "trading.allowed_directions.short", True)
+    directions = _required_section(section, "allowed_directions")
+    long_enabled = _required_bool(directions, "long", "trading.allowed_directions.long")
+    short_enabled = _required_bool(directions, "short", "trading.allowed_directions.short")
 
     if not long_enabled and not short_enabled:
         raise SettingsValidationError("At least one trading direction must be enabled.")
@@ -347,26 +338,23 @@ def _load_ib(raw: dict[str, Any]) -> IBSettings:
 
 
 def _load_telegram(raw: dict[str, Any]) -> TelegramSettings:
-    section = _optional_section(raw, "telegram")
-    enabled = _optional_bool(section, "enabled", "telegram.enabled", DEFAULT_TELEGRAM_ENABLED)
-    max_retries = _optional_int(section, "max_retries", "telegram.max_retries", DEFAULT_TELEGRAM_MAX_RETRIES)
-    retry_delay_seconds = _optional_float(
+    section = _required_section(raw, "telegram")
+    enabled = _required_bool(section, "enabled", "telegram.enabled")
+    max_retries = _required_int(section, "max_retries", "telegram.max_retries")
+    retry_delay_seconds = _required_float(
         section,
         "retry_delay_seconds",
         "telegram.retry_delay_seconds",
-        DEFAULT_TELEGRAM_RETRY_DELAY_SECONDS,
     )
-    timeout_seconds = _optional_float(
+    timeout_seconds = _required_float(
         section,
         "timeout_seconds",
         "telegram.timeout_seconds",
-        DEFAULT_TELEGRAM_TIMEOUT_SECONDS,
     )
-    require_critical_delivery = _optional_bool(
+    require_critical_delivery = _required_bool(
         section,
         "require_critical_delivery",
         "telegram.require_critical_delivery",
-        DEFAULT_TELEGRAM_REQUIRE_CRITICAL_DELIVERY,
     )
 
     if max_retries < 0:
@@ -408,15 +396,13 @@ def _load_telegram(raw: dict[str, Any]) -> TelegramSettings:
 
 
 def _load_signal_instrument(raw: dict[str, Any]) -> InstrumentSettings:
-    section = _optional_section(raw, "signal_instrument")
-    if not section:
-        section = _required_section(raw, "instrument")
+    section = _required_section(raw, "signal_instrument")
 
-    asset_class = _required_string(section, "asset_class", "instrument.asset_class")
-    symbol = _required_string(section, "symbol", "instrument.symbol")
-    exchange = _required_string(section, "exchange", "instrument.exchange")
-    currency = _required_string(section, "currency", "instrument.currency")
-    expiry = _optional_string(section, "expiry", "instrument.expiry")
+    asset_class = _required_string(section, "asset_class", "signal_instrument.asset_class")
+    symbol = _required_string(section, "symbol", "signal_instrument.symbol")
+    exchange = _required_string(section, "exchange", "signal_instrument.exchange")
+    currency = _required_string(section, "currency", "signal_instrument.currency")
+    expiry = _required_nullable_string(section, "expiry", "signal_instrument.expiry")
 
     asset_class = asset_class.upper()
     currency = currency.upper()
@@ -621,12 +607,7 @@ def _load_risk(raw: dict[str, Any]) -> RiskSettings:
 def _load_strategy(raw: dict[str, Any]) -> StrategySettings:
     section = _required_section(raw, "strategy")
     bias_threshold = _required_float(section, "bias_threshold", "strategy.bias_threshold")
-    use_heikin_ashi = _optional_bool(
-        section,
-        "use_heikin_ashi",
-        "strategy.use_heikin_ashi",
-        DEFAULT_STRATEGY_USE_HEIKIN_ASHI,
-    )
+    use_heikin_ashi = _required_bool(section, "use_heikin_ashi", "strategy.use_heikin_ashi")
     atr_length = _required_int(section, "atr_length", "strategy.atr_length")
     sl_atr_mult = _required_float(section, "sl_atr_mult", "strategy.sl_atr_mult")
     tp_atr_mult = _required_float(section, "tp_atr_mult", "strategy.tp_atr_mult")
@@ -683,11 +664,10 @@ def _load_health(raw: dict[str, Any]) -> HealthSettings:
 def _load_runtime(raw: dict[str, Any]) -> RuntimeSettings:
     section = _required_section(raw, "runtime")
     poll_seconds = _required_int(section, "poll_seconds", "runtime.poll_seconds")
-    active_trade_monitor_seconds = _optional_int(
+    active_trade_monitor_seconds = _required_int(
         section,
         "active_trade_monitor_seconds",
         "runtime.active_trade_monitor_seconds",
-        DEFAULT_RUNTIME_ACTIVE_TRADE_MONITOR_SECONDS,
     )
 
     if poll_seconds <= 0:
@@ -703,13 +683,8 @@ def _load_runtime(raw: dict[str, Any]) -> RuntimeSettings:
 
 def _load_live(raw: dict[str, Any]) -> LiveModeSettings:
     section = _required_section(raw, "live")
-    enabled = _optional_bool(section, "enabled", "live.enabled", False)
-    allow_telegram_failure = _optional_bool(
-        section,
-        "allow_telegram_failure",
-        "live.allow_telegram_failure",
-        False,
-    )
+    enabled = _required_bool(section, "enabled", "live.enabled")
+    allow_telegram_failure = _required_bool(section, "allow_telegram_failure", "live.allow_telegram_failure")
 
     return LiveModeSettings(
         enabled=enabled,
@@ -758,15 +733,6 @@ def _required_section(raw: dict[str, Any], key: str) -> dict[str, Any]:
     return value
 
 
-def _optional_section(raw: dict[str, Any], key: str) -> dict[str, Any]:
-    value = raw.get(key)
-    if value is None:
-        return {}
-    if not isinstance(value, dict):
-        raise SettingsValidationError(f"Invalid settings section: {key}.")
-    return value
-
-
 def _required_string(section: dict[str, Any], key: str, field_name: str) -> str:
     value = section.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -774,12 +740,15 @@ def _required_string(section: dict[str, Any], key: str, field_name: str) -> str:
     return value.strip()
 
 
-def _optional_string(section: dict[str, Any], key: str, field_name: str) -> str | None:
-    value = section.get(key)
+def _required_nullable_string(section: dict[str, Any], key: str, field_name: str) -> str | None:
+    if key not in section:
+        raise SettingsValidationError(f"{field_name} is required.")
+
+    value = section[key]
     if value is None:
         return None
     if not isinstance(value, str) or not value.strip():
-        raise SettingsValidationError(f"{field_name} must be a non-empty string when provided.")
+        raise SettingsValidationError(f"{field_name} must be null or a non-empty string.")
     return value.strip()
 
 
@@ -787,24 +756,6 @@ def _required_int(section: dict[str, Any], key: str, field_name: str) -> int:
     value = section.get(key)
     if isinstance(value, bool) or not isinstance(value, int):
         raise SettingsValidationError(f"{field_name} must be an integer.")
-    return value
-
-
-def _optional_int(section: dict[str, Any], key: str, field_name: str, default: int) -> int:
-    value = section.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise SettingsValidationError(f"{field_name} must be an integer.")
-    return value
-
-
-def _optional_int_or_none(section: dict[str, Any], key: str, field_name: str) -> int | None:
-    value = section.get(key)
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise SettingsValidationError(f"{field_name} must be an integer when provided.")
-    if value <= 0:
-        raise SettingsValidationError(f"{field_name} must be greater than zero when provided.")
     return value
 
 
@@ -826,20 +777,6 @@ def _required_decimal(section: dict[str, Any], key: str, field_name: str) -> Dec
         raise SettingsValidationError(f"{field_name} must be a number.") from exc
 
     return result
-
-
-def _optional_float(section: dict[str, Any], key: str, field_name: str, default: float) -> float:
-    value = section.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SettingsValidationError(f"{field_name} must be a number.")
-    return float(value)
-
-
-def _optional_bool(section: dict[str, Any], key: str, field_name: str, default: bool) -> bool:
-    value = section.get(key, default)
-    if not isinstance(value, bool):
-        raise SettingsValidationError(f"{field_name} must be true or false.")
-    return value
 
 
 def _required_bool(section: dict[str, Any], key: str, field_name: str) -> bool:

@@ -70,10 +70,10 @@ class BiasModelError(ValueError):
     """Raised when bias cannot be calculated safely."""
 
 
-def calculate_bias(indicators: pd.DataFrame) -> pd.DataFrame:
+def calculate_bias(indicators: pd.DataFrame, *, atr_period: int) -> pd.DataFrame:
     """Return a new DataFrame with ABM vote details, bias, and confidence."""
 
-    result = _prepare_indicators(indicators)
+    result = _prepare_indicators(indicators, atr_period=atr_period)
     src_close = result["src_close"]
 
     result["ema_trend_vote"] = _sum_pair_votes(result, EMA_TREND_PAIRS)
@@ -111,11 +111,11 @@ def calculate_bias(indicators: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _prepare_indicators(indicators: pd.DataFrame) -> pd.DataFrame:
+def _prepare_indicators(indicators: pd.DataFrame, *, atr_period: int) -> pd.DataFrame:
     if not isinstance(indicators, pd.DataFrame):
         raise BiasModelError("Indicators must be provided as a pandas DataFrame.")
 
-    minimum_rows = required_indicator_warmup_bars()
+    minimum_rows = required_indicator_warmup_bars(atr_period=atr_period)
     if len(indicators) < minimum_rows:
         raise BiasModelError(
             f"Indicator warmup is incomplete: {len(indicators)} closed bars available; "

@@ -7,11 +7,11 @@ from typing import Any, Literal
 
 from ib_async import LimitOrder, MarketOrder, Order, StopOrder
 
-from config.defaults import DEFAULT_EXECUTION_ENTRY_ORDER_TYPE
 from domain.constants import BROKER_ACTION_BUY, BROKER_ACTION_SELL, BROKER_ACTIONS
 
 OrderAction = Literal["BUY", "SELL"]
 EntryOrderType = Literal["market"]
+MARKET_ENTRY_ORDER_TYPE = "market"
 
 
 class OrderBuilderError(ValueError):
@@ -48,7 +48,7 @@ class OrderBuilder:
         self,
         trade_plan: Any,
         *,
-        order_type: EntryOrderType = DEFAULT_EXECUTION_ENTRY_ORDER_TYPE,
+        order_type: EntryOrderType,
         limit_price: float | None = None,
         stop_loss_price: float | None = None,
         take_profit_price: float | None = None,
@@ -98,7 +98,7 @@ class OrderBuilder:
     def build_market_order(self, trade_plan: Any) -> Order:
         """Build a single market entry order."""
 
-        return self.build_order_set(trade_plan, order_type=DEFAULT_EXECUTION_ENTRY_ORDER_TYPE).entry_order
+        return self.build_order_set(trade_plan, order_type=MARKET_ENTRY_ORDER_TYPE).entry_order
 
     def build_exit_oca_orders(
         self,
@@ -189,7 +189,7 @@ class OrderBuilder:
         order_type: EntryOrderType,
         limit_price: float | None,
     ) -> Order:
-        if order_type == DEFAULT_EXECUTION_ENTRY_ORDER_TYPE:
+        if order_type == MARKET_ENTRY_ORDER_TYPE:
             if limit_price is not None:
                 raise OrderBuilderError("limit_price is only valid for limit orders.")
             return MarketOrder(action, quantity)

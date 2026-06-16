@@ -7,13 +7,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from config.defaults import (
-    DEFAULT_LOG_DATE_FORMAT,
-    DEFAULT_LOG_FILE_PATH,
-    DEFAULT_LOG_FORMAT,
-    DEFAULT_LOG_LEVEL,
-)
-
 BOT_LOGGER_NAME = "abm_ib_bot"
 _HANDLER_MARKER = "_abm_ib_bot_handler"
 
@@ -36,15 +29,14 @@ def setup_logging(
     log_path = _resolve_file_path(logger_settings, file_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    log_level = _normalize_log_level(_resolve_setting(logger_settings, "level", level, DEFAULT_LOG_LEVEL))
+    log_level = _normalize_log_level(_resolve_setting(logger_settings, "level", level))
     formatter = logging.Formatter(
         _resolve_setting(
             logger_settings,
             "format",
             log_format,
-            DEFAULT_LOG_FORMAT,
         ),
-        datefmt=_resolve_setting(logger_settings, "date_format", date_format, DEFAULT_LOG_DATE_FORMAT),
+        datefmt=_resolve_setting(logger_settings, "date_format", date_format),
     )
 
     root_logger = logging.getLogger()
@@ -79,16 +71,19 @@ def get_logger(name: str | None = None) -> logging.Logger:
 
 
 def _resolve_file_path(settings: Any | None, file_path: str | Path | None) -> Path:
-    resolved = _resolve_setting(settings, "file_path", file_path, DEFAULT_LOG_FILE_PATH)
+    resolved = _resolve_setting(settings, "file_path", file_path)
     return Path(resolved)
 
 
-def _resolve_setting(settings: Any | None, name: str, override: Any | None, default: Any) -> Any:
+def _resolve_setting(settings: Any | None, name: str, override: Any | None) -> Any:
     if override is not None:
         return override
     if settings is None:
-        return default
-    return getattr(settings, name, default)
+        raise ValueError(f"logger.{name} is required.")
+    value = getattr(settings, name, None)
+    if value is None:
+        raise ValueError(f"logger.{name} is required.")
+    return value
 
 
 def _normalize_log_level(level: int | str) -> int:

@@ -6,12 +6,6 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR, InvalidOperation
 from typing import Any
 
-from config.defaults import (
-    DEFAULT_SIZING_ALLOW_FRACTIONAL,
-    DEFAULT_SIZING_MIN_QUANTITY,
-    DEFAULT_SIZING_QUANTITY_STEP,
-)
-
 
 class RiskSizingError(ValueError):
     """Raised when a trade quantity cannot be sized safely."""
@@ -19,9 +13,9 @@ class RiskSizingError(ValueError):
 
 @dataclass(frozen=True)
 class QuantityRules:
-    min_quantity: Decimal = DEFAULT_SIZING_MIN_QUANTITY
-    quantity_step: Decimal = DEFAULT_SIZING_QUANTITY_STEP
-    allow_fractional: bool = DEFAULT_SIZING_ALLOW_FRACTIONAL
+    min_quantity: Decimal
+    quantity_step: Decimal
+    allow_fractional: bool
 
 
 def quantity_rules_from_settings(settings: Any) -> QuantityRules:
@@ -45,8 +39,8 @@ def calculate_capital_per_position(initial_capital: float, capital_slots: int) -
 def calculate_quantity(
     capital_per_position: float,
     *,
-    product_price: float | None = None,
-    quantity_rules: QuantityRules | None = None,
+    product_price: float,
+    quantity_rules: QuantityRules,
 ) -> float:
     """Calculate a simple order quantity for a selected derivative product.
 
@@ -54,12 +48,9 @@ def calculate_quantity(
     intended capital allocation.
     """
 
-    rules = quantity_rules or QuantityRules()
+    rules = quantity_rules
     _validate_quantity_rules(rules)
     capital = _positive_decimal(capital_per_position, "capital_per_position")
-
-    if product_price is None:
-        raise RiskSizingError("product_price is required to calculate quantity.")
 
     price = _positive_decimal(product_price, "product_price")
     raw_quantity = capital / price

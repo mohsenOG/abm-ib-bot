@@ -16,6 +16,8 @@ The runner uses `settings.yml` for non-secret runtime behavior. `live.enabled` i
 
 Use `settings.yml` for operational settings: trading mode, market-data request shape, execution product file path, order timeouts, quote/status polling, sizing rules, risk limits, health thresholds, logging paths, state path, and trade journal path.
 
+The app does not provide code defaults for `settings.yml`. Every required section and key must be present, and startup fails during settings load when a setting is missing or invalid. Nullable settings must still be written explicitly, for example `signal_instrument.expiry: null`.
+
 Use `.env` for secrets and deployment-specific account/chat values only. `.env.example` intentionally contains blank placeholders:
 
 ```env

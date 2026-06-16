@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from config.defaults import DEFAULT_STRATEGY_ATR_LENGTH
 from data.schema import CANDLE_CLOSE, CANDLE_HIGH, CANDLE_LOW, CANDLE_OPEN
 
 REQUIRED_PRICE_COLUMNS = (CANDLE_OPEN, CANDLE_HIGH, CANDLE_LOW, CANDLE_CLOSE)
@@ -23,7 +22,7 @@ ROC_PERIODS = (13, 27)
 BREAKOUT_PERIODS = (5, 17, 21)
 
 
-def required_indicator_warmup_bars(*, atr_period: int = DEFAULT_STRATEGY_ATR_LENGTH) -> int:
+def required_indicator_warmup_bars(*, atr_period: int) -> int:
     """Return the minimum closed candles needed before signal calculations are meaningful."""
 
     _validate_positive_period(atr_period, "atr_period")
@@ -48,7 +47,7 @@ def add_indicators(
     candles: pd.DataFrame,
     use_heikin_ashi: bool,
     *,
-    atr_period: int = DEFAULT_STRATEGY_ATR_LENGTH,
+    atr_period: int,
 ) -> pd.DataFrame:
     """Return a new DataFrame with all indicators required by the ABM strategy."""
 

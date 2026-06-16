@@ -6,11 +6,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from config.defaults import (
-    DEFAULT_HEALTH_LAST_PROCESSED_CANDLE_MAX_AGE_SECONDS,
-    DEFAULT_HEALTH_MARKET_DATA_MAX_AGE_SECONDS,
-    DEFAULT_HEALTH_REPEATED_ERROR_LIMIT,
-)
 from logging_setup.logger import get_logger
 
 
@@ -61,11 +56,9 @@ class HealthMonitor:
     def __init__(
         self,
         *,
-        market_data_max_age: timedelta = timedelta(seconds=DEFAULT_HEALTH_MARKET_DATA_MAX_AGE_SECONDS),
-        last_processed_candle_max_age: timedelta = timedelta(
-            seconds=DEFAULT_HEALTH_LAST_PROCESSED_CANDLE_MAX_AGE_SECONDS
-        ),
-        repeated_error_limit: int = DEFAULT_HEALTH_REPEATED_ERROR_LIMIT,
+        market_data_max_age: timedelta,
+        last_processed_candle_max_age: timedelta,
+        repeated_error_limit: int,
         notifier: Any | None = None,
     ) -> None:
         if market_data_max_age <= timedelta(0):
