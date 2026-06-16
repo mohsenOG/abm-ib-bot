@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pandas as pd
+
 from config.settings import AppSettings, load_settings
 from data.candle_store import CandleStore
 from data.market_calendar import MarketCalendar, MarketCalendarError
@@ -62,6 +64,31 @@ class RuntimeRecovery:
     signal_contract: Any
     market_calendar: MarketCalendar
     state: BotState
+
+
+@dataclass(frozen=True)
+class CandleGapImpactValidation:
+    validation: Any
+    blocking_unexpected_data_gaps: tuple[Any, ...]
+    degraded_unexpected_data_gaps: tuple[Any, ...]
+    repair_attempted_count: int = 0
+    repair_rows_received: int = 0
+
+    @property
+    def expected_session_gaps(self) -> tuple[Any, ...]:
+        return self.validation.expected_session_gaps
+
+    @property
+    def unexpected_data_gaps(self) -> tuple[Any, ...]:
+        return self.validation.unexpected_data_gaps
+
+    @property
+    def signal_processing_allowed(self) -> bool:
+        return not self.blocking_unexpected_data_gaps
+
+    @property
+    def data_quality(self) -> str:
+        return "degraded" if self.degraded_unexpected_data_gaps else "normal"
 
 
 MAX_SESSION_CANDLES = 1000
@@ -322,16 +349,18 @@ class BotRunner:
             candle_close_buffer_seconds=self.settings.market_data.candle_close_buffer_seconds,
         )
         update = candle_store.update(candles)
-        validation = self._validate_candle_gaps_with_calendar(
+        gap_impact = await self._repair_and_validate_candle_gaps(
+            ib=ib,
+            signal_contract=signal_contract,
             candle_store=candle_store,
             gaps=update.gaps,
             market_calendar=market_calendar,
         )
-        self._log_candle_gap_validation(validation)
-        if not validation.signal_processing_allowed:
-            details = _format_missing_bars(validation.unexpected_data_gaps)
+        self._log_candle_gap_impact_validation(gap_impact, market_calendar=market_calendar, candle_store=candle_store)
+        if not gap_impact.signal_processing_allowed:
+            details = _format_missing_bars(gap_impact.blocking_unexpected_data_gaps)
             raise BotRunnerError(f"Runtime recovery candle refresh has unexpected open-session gaps: {details}")
-        return update.latest_closed_candle_ts
+        return candle_store.latest_closed_candle_ts
 
     def _create_active_trade_monitor_task(self, *, ib: Any, once: bool) -> asyncio.Task[Any] | None:
         if once or self.settings.trading.mode != PAPER_MODE:
@@ -371,25 +400,28 @@ class BotRunner:
             self._run_health_checks(ib=ib, state=state, latest_market_data_ts=None)
             return state
 
-        validation = self._validate_candle_gaps_with_calendar(
+        gap_impact = await self._repair_and_validate_candle_gaps(
+            ib=ib,
+            signal_contract=signal_contract,
             candle_store=candle_store,
             gaps=update.gaps,
             market_calendar=market_calendar,
         )
-        self._log_candle_gap_validation(validation)
-        if not validation.signal_processing_allowed:
-            gap_summary = _format_missing_bars(validation.unexpected_data_gaps)
+        self._log_candle_gap_impact_validation(gap_impact, market_calendar=market_calendar, candle_store=candle_store)
+        latest_market_data_ts = candle_store.latest_closed_candle_ts
+        if not gap_impact.signal_processing_allowed:
+            gap_summary = _format_missing_bars(gap_impact.blocking_unexpected_data_gaps)
             await self._notify(
                 "send_critical_error",
                 message="Unexpected open-session candle gap blocked signal processing",
                 details=gap_summary,
             )
-            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=update.latest_closed_candle_ts)
+            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_market_data_ts)
             return state
 
         if not candle_store.has_new_closed_candle():
             self.logger.info("No new closed candle to process.")
-            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=update.latest_closed_candle_ts)
+            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_market_data_ts)
             return state
 
         try:
@@ -541,20 +573,195 @@ class BotRunner:
             raise BotRunnerError("Signal processing blocked: XAUUSD IBKR market calendar is unavailable.")
         return market_calendar.validate_candle_gaps(gaps, candle_store.candle_interval)
 
-    def _log_candle_gap_validation(self, validation: Any) -> None:
-        self.logger.info(
-            "Candle gap validation completed. expected_session_gaps=%s unexpected_data_gaps=%s signal_processing_allowed=%s",
-            len(validation.expected_session_gaps),
-            len(validation.unexpected_data_gaps),
-            validation.signal_processing_allowed,
+    async def _repair_and_validate_candle_gaps(
+        self,
+        *,
+        ib: Any,
+        signal_contract: Any,
+        candle_store: CandleStore,
+        gaps: tuple[Any, ...],
+        market_calendar: MarketCalendar | None,
+    ) -> CandleGapImpactValidation:
+        validation = self._validate_candle_gaps_with_calendar(
+            candle_store=candle_store,
+            gaps=gaps,
+            market_calendar=market_calendar,
         )
-        for missing_bar in validation.unexpected_data_gaps:
+        if not validation.unexpected_data_gaps:
+            return self._classify_candle_gap_impact(
+                validation=validation,
+                candle_store=candle_store,
+                market_calendar=market_calendar,
+            )
+
+        repaired_validation, attempted_count, rows_received = await self._attempt_unexpected_gap_backfills(
+            ib=ib,
+            signal_contract=signal_contract,
+            candle_store=candle_store,
+            unexpected_data_gaps=validation.unexpected_data_gaps,
+            market_calendar=market_calendar,
+        )
+        return self._classify_candle_gap_impact(
+            validation=repaired_validation,
+            candle_store=candle_store,
+            market_calendar=market_calendar,
+            repair_attempted_count=attempted_count,
+            repair_rows_received=rows_received,
+        )
+
+    async def _attempt_unexpected_gap_backfills(
+        self,
+        *,
+        ib: Any,
+        signal_contract: Any,
+        candle_store: CandleStore,
+        unexpected_data_gaps: tuple[Any, ...],
+        market_calendar: MarketCalendar | None,
+    ) -> tuple[Any, int, int]:
+        backfill_duration = self.settings.market_data.gap_backfill_duration
+        missing_bars = _unique_missing_bars(unexpected_data_gaps)
+        attempted_count = 0
+        rows_received = 0
+        client = MarketDataClient(ib, settings=self.settings.market_data)
+
+        for missing_bar in missing_bars:
+            missing_timestamp = _missing_bar_timestamp(missing_bar)
+            end_timestamp = _centered_backfill_end_timestamp(
+                missing_timestamp=missing_timestamp,
+                duration=backfill_duration,
+                latest_closed_candle_ts=candle_store.latest_closed_candle_ts,
+                candle_interval=candle_store.candle_interval,
+            )
+            end_datetime = _format_ib_end_datetime(end_timestamp)
             self.logger.warning(
-                "Unexpected candle gap detail. previous_candle=%s next_candle=%s missing_timestamp=%s reason=%s",
+                "Attempting targeted IBKR candle gap backfill. missing_timestamp=%s duration=%s end_datetime=%s",
+                missing_timestamp,
+                backfill_duration,
+                end_datetime,
+            )
+
+            attempted_count += 1
+            try:
+                candles = await client.fetch_historical_bars(
+                    signal_contract,
+                    request=HistoricalDataRequest(end_datetime=end_datetime, duration_str=backfill_duration),
+                )
+            except Exception:
+                self.logger.exception(
+                    "Targeted IBKR candle gap backfill failed. missing_timestamp=%s duration=%s end_datetime=%s",
+                    missing_timestamp,
+                    backfill_duration,
+                    end_datetime,
+                )
+                continue
+
+            rows_received += len(candles)
+            candle_store.update(candles)
+
+        candle_store.trim_to_latest(MAX_SESSION_CANDLES)
+        repaired_gaps = candle_store.detect_missing_candles()
+        repaired_validation = self._validate_candle_gaps_with_calendar(
+            candle_store=candle_store,
+            gaps=repaired_gaps,
+            market_calendar=market_calendar,
+        )
+        remaining_missing = {
+            _missing_bar_timestamp(missing_bar) for missing_bar in repaired_validation.unexpected_data_gaps
+        }
+        filled_count = sum(
+            1 for missing_bar in missing_bars if _missing_bar_timestamp(missing_bar) not in remaining_missing
+        )
+        self.logger.info(
+            "Targeted IBKR candle gap backfill completed. attempted=%s rows_received=%s filled_missing_timestamps=%s remaining_unexpected_data_gaps=%s",
+            attempted_count,
+            rows_received,
+            filled_count,
+            len(repaired_validation.unexpected_data_gaps),
+        )
+        return repaired_validation, attempted_count, rows_received
+
+    def _classify_candle_gap_impact(
+        self,
+        *,
+        validation: Any,
+        candle_store: CandleStore,
+        market_calendar: MarketCalendar | None,
+        repair_attempted_count: int = 0,
+        repair_rows_received: int = 0,
+    ) -> CandleGapImpactValidation:
+        if market_calendar is None:
+            raise BotRunnerError("Signal processing blocked: XAUUSD IBKR market calendar is unavailable.")
+
+        latest_closed = candle_store.latest_closed_candle_ts
+        blocking: list[Any] = []
+        degraded: list[Any] = []
+        for missing_bar in validation.unexpected_data_gaps:
+            distance = _open_session_bars_from_latest(
+                market_calendar=market_calendar,
+                missing_bar=missing_bar,
+                latest_closed_candle_ts=latest_closed,
+                candle_interval=candle_store.candle_interval,
+            )
+            if distance <= self.settings.market_data.gap_block_recent_bars:
+                blocking.append(missing_bar)
+            else:
+                degraded.append(missing_bar)
+
+        return CandleGapImpactValidation(
+            validation=validation,
+            blocking_unexpected_data_gaps=tuple(blocking),
+            degraded_unexpected_data_gaps=tuple(degraded),
+            repair_attempted_count=repair_attempted_count,
+            repair_rows_received=repair_rows_received,
+        )
+
+    def _log_candle_gap_impact_validation(
+        self,
+        impact: CandleGapImpactValidation,
+        *,
+        market_calendar: MarketCalendar,
+        candle_store: CandleStore,
+    ) -> None:
+        self.logger.info(
+            "Candle gap validation completed. expected_session_gaps=%s unexpected_data_gaps=%s blocking_unexpected_data_gaps=%s degraded_unexpected_data_gaps=%s signal_processing_allowed=%s data_quality=%s repair_attempted=%s repair_rows_received=%s",
+            len(impact.expected_session_gaps),
+            len(impact.unexpected_data_gaps),
+            len(impact.blocking_unexpected_data_gaps),
+            len(impact.degraded_unexpected_data_gaps),
+            impact.signal_processing_allowed,
+            impact.data_quality,
+            impact.repair_attempted_count,
+            impact.repair_rows_received,
+        )
+        for missing_bar in impact.blocking_unexpected_data_gaps:
+            distance = _open_session_bars_from_latest(
+                market_calendar=market_calendar,
+                missing_bar=missing_bar,
+                latest_closed_candle_ts=candle_store.latest_closed_candle_ts,
+                candle_interval=candle_store.candle_interval,
+            )
+            self.logger.error(
+                "Blocking unrepaired candle gap detail. previous_candle=%s next_candle=%s missing_timestamp=%s reason=%s open_session_bars_from_latest=%s",
                 missing_bar.previous_timestamp,
                 missing_bar.next_timestamp,
                 missing_bar.missing_timestamp,
                 missing_bar.reason,
+                distance,
+            )
+        for missing_bar in impact.degraded_unexpected_data_gaps:
+            distance = _open_session_bars_from_latest(
+                market_calendar=market_calendar,
+                missing_bar=missing_bar,
+                latest_closed_candle_ts=candle_store.latest_closed_candle_ts,
+                candle_interval=candle_store.candle_interval,
+            )
+            self.logger.warning(
+                "Allowed unrepaired candle gap detail. data_quality=degraded previous_candle=%s next_candle=%s missing_timestamp=%s reason=%s open_session_bars_from_latest=%s",
+                missing_bar.previous_timestamp,
+                missing_bar.next_timestamp,
+                missing_bar.missing_timestamp,
+                missing_bar.reason,
+                distance,
             )
 
     def _calculate_latest_signal(self, candle_store: CandleStore, state: BotState) -> Signal | None:
@@ -830,6 +1037,103 @@ def _required_active_trade_int(active_trade: dict[str, Any], name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise BotRunnerError(f"Active trade {name} must be a positive integer for runtime recovery.")
     return value
+
+
+def _unique_missing_bars(missing_bars: tuple[Any, ...]) -> tuple[Any, ...]:
+    by_timestamp: dict[pd.Timestamp, Any] = {}
+    for missing_bar in missing_bars:
+        timestamp = _missing_bar_timestamp(missing_bar)
+        by_timestamp.setdefault(timestamp, missing_bar)
+    return tuple(by_timestamp[timestamp] for timestamp in sorted(by_timestamp))
+
+
+def _missing_bar_timestamp(missing_bar: Any) -> pd.Timestamp:
+    return _required_utc_timestamp(getattr(missing_bar, "missing_timestamp", None), "missing_timestamp")
+
+
+def _open_session_bars_from_latest(
+    *,
+    market_calendar: MarketCalendar,
+    missing_bar: Any,
+    latest_closed_candle_ts: Any | None,
+    candle_interval: pd.Timedelta,
+) -> int:
+    if latest_closed_candle_ts is None:
+        return 0
+    return market_calendar.count_open_session_bars_after(
+        _missing_bar_timestamp(missing_bar),
+        latest_closed_candle_ts,
+        candle_interval,
+    )
+
+
+def _centered_backfill_end_timestamp(
+    *,
+    missing_timestamp: pd.Timestamp,
+    duration: str,
+    latest_closed_candle_ts: Any | None,
+    candle_interval: pd.Timedelta,
+) -> pd.Timestamp:
+    duration_delta = _ib_duration_to_timedelta(duration, "market_data.gap_backfill_duration")
+    centered_end = missing_timestamp + (duration_delta / 2)
+    cap = _backfill_end_cap(latest_closed_candle_ts=latest_closed_candle_ts, candle_interval=candle_interval)
+    return min(centered_end, cap)
+
+
+def _backfill_end_cap(*, latest_closed_candle_ts: Any | None, candle_interval: pd.Timedelta) -> pd.Timestamp:
+    now = pd.Timestamp(datetime.now(timezone.utc))
+    if latest_closed_candle_ts is None:
+        return now
+
+    latest_closed = _required_utc_timestamp(latest_closed_candle_ts, "latest_closed_candle_ts")
+    latest_closed_end = latest_closed + candle_interval
+    return min(latest_closed_end, now)
+
+
+def _format_ib_end_datetime(timestamp: pd.Timestamp) -> str:
+    value = _required_utc_timestamp(timestamp, "end_datetime").floor("s")
+    return f"{value:%Y%m%d %H:%M:%S} UTC"
+
+
+def _ib_duration_to_timedelta(value: str, name: str) -> pd.Timedelta:
+    parts = value.strip().split()
+    if len(parts) != 2:
+        raise BotRunnerError(f"{name} must use '<positive integer> <unit>', for example '1 D'.")
+
+    quantity_text, unit_text = parts
+    try:
+        quantity = int(quantity_text)
+    except ValueError as exc:
+        raise BotRunnerError(f"{name} quantity must be a positive integer.") from exc
+
+    if quantity <= 0:
+        raise BotRunnerError(f"{name} quantity must be a positive integer.")
+
+    unit = unit_text.upper()
+    if unit == "S":
+        return pd.Timedelta(seconds=quantity)
+    if unit == "H":
+        return pd.Timedelta(hours=quantity)
+    if unit == "D":
+        return pd.Timedelta(days=quantity)
+    if unit == "W":
+        return pd.Timedelta(weeks=quantity)
+
+    raise BotRunnerError(f"{name} unit must be one of S, H, D, or W for centered gap backfill.")
+
+
+def _required_utc_timestamp(value: Any, name: str) -> pd.Timestamp:
+    try:
+        timestamp = pd.Timestamp(value)
+    except Exception as exc:
+        raise BotRunnerError(f"{name} must be a valid timestamp.") from exc
+
+    if pd.isna(timestamp):
+        raise BotRunnerError(f"{name} must be a valid timestamp.")
+
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize(timezone.utc)
+    return timestamp.tz_convert(timezone.utc)
 
 
 def _format_missing_bars(missing_bars: tuple[Any, ...]) -> str:

@@ -10,6 +10,8 @@ market_data:
   what_to_show: MIDPOINT
   use_rth: false
   candle_close_buffer_seconds: 5
+  gap_block_recent_bars: 25
+  gap_backfill_duration: "1 D"
 
 ib:
   host: 127.0.0.1

@@ -83,6 +83,27 @@ class MarketCalendar:
         end = start + candle_interval
         return any(session.start_utc <= start and end <= session.end_utc for session in self.trading_sessions)
 
+    def count_open_session_bars_after(
+        self,
+        bar_start: Any,
+        latest_closed_bar_start: Any,
+        candle_interval: pd.Timedelta,
+    ) -> int:
+        """Count expected open-session bars after one bar through the latest closed bar."""
+
+        start = _normalize_timestamp(bar_start, "bar_start") + candle_interval
+        latest_closed = _normalize_timestamp(latest_closed_bar_start, "latest_closed_bar_start")
+        if latest_closed < start:
+            return 0
+
+        count = 0
+        current = start
+        while current <= latest_closed:
+            if self.is_full_bar_inside_trading_session(current, candle_interval):
+                count += 1
+            current += candle_interval
+        return count
+
     def validate_candle_gaps(self, gaps: tuple[Any, ...], candle_interval: pd.Timedelta) -> GapValidationResult:
         expected: list[MissingBar] = []
         unexpected: list[MissingBar] = []

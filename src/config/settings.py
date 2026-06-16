@@ -54,6 +54,8 @@ class MarketDataSettings:
     what_to_show: str
     use_rth: bool
     candle_close_buffer_seconds: float
+    gap_block_recent_bars: int
+    gap_backfill_duration: str
 
 
 @dataclass(frozen=True)
@@ -293,6 +295,8 @@ def _load_market_data(raw: dict[str, Any]) -> MarketDataSettings:
         "candle_close_buffer_seconds",
         "market_data.candle_close_buffer_seconds",
     )
+    gap_block_recent_bars = _required_int(section, "gap_block_recent_bars", "market_data.gap_block_recent_bars")
+    gap_backfill_duration = _required_string(section, "gap_backfill_duration", "market_data.gap_backfill_duration")
 
     if bar_size != SUPPORTED_BAR_SIZE_1_HOUR:
         raise SettingsValidationError(
@@ -301,6 +305,8 @@ def _load_market_data(raw: dict[str, Any]) -> MarketDataSettings:
 
     if candle_close_buffer_seconds < 0:
         raise SettingsValidationError("market_data.candle_close_buffer_seconds must be zero or greater.")
+    if gap_block_recent_bars <= 0:
+        raise SettingsValidationError("market_data.gap_block_recent_bars must be greater than zero.")
 
     return MarketDataSettings(
         bar_size=bar_size,
@@ -308,6 +314,8 @@ def _load_market_data(raw: dict[str, Any]) -> MarketDataSettings:
         what_to_show=what_to_show,
         use_rth=use_rth,
         candle_close_buffer_seconds=candle_close_buffer_seconds,
+        gap_block_recent_bars=gap_block_recent_bars,
+        gap_backfill_duration=gap_backfill_duration,
     )
 
 

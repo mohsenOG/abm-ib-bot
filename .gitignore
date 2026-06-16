@@ -221,3 +221,7 @@ __marimo__/
 #temparory
 
 temp/
+
+# Unnecessary files
+trade_journal.csv
+bot_state.json
