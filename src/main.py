@@ -293,6 +293,7 @@ class BotRunner:
         candle_store = CandleStore(
             latest_processed_candle_ts=state.last_processed_candle_ts,
             bar_size=self.settings.market_data.bar_size,
+            candle_close_buffer_seconds=self.settings.market_data.candle_close_buffer_seconds,
         )
         update = candle_store.update(candles)
         if update.gaps:
@@ -320,16 +321,32 @@ class BotRunner:
         )
 
         self.logger.info(
-            "Candle store updated. request_scope=%s rows_received=%s rows_stored=%s latest_closed=%s gaps=%s",
+            "Candle store updated. request_scope=%s rows_received=%s rows_stored=%s latest_closed=%s gaps=%s dropped_unfinished=%s",
             request_scope,
             update.rows_received,
             update.rows_stored,
             update.latest_closed_candle_ts,
             len(update.gaps),
+            update.rows_dropped_unfinished,
         )
 
         if update.latest_closed_candle_ts is None:
             self._run_health_checks(ib=ib, state=state, latest_market_data_ts=None)
+            return state
+
+        if update.gaps:
+            gap_summary = _format_candle_gaps(update.gaps)
+            self.logger.warning(
+                "Candle gap detected after cache merge; signal processing blocked. gaps=%s details=%s",
+                len(update.gaps),
+                gap_summary,
+            )
+            await self._notify(
+                "send_critical_error",
+                message="Candle gap blocked signal processing",
+                details=gap_summary,
+            )
+            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=update.latest_closed_candle_ts)
             return state
 
         if not candle_store.has_new_closed_candle():
@@ -394,6 +411,7 @@ class BotRunner:
             self._candle_store = CandleStore(
                 latest_processed_candle_ts=state.last_processed_candle_ts,
                 bar_size=self.settings.market_data.bar_size,
+                candle_close_buffer_seconds=self.settings.market_data.candle_close_buffer_seconds,
             )
             update = self._candle_store.update(candles)
             self._candle_store.trim_to_latest(MAX_SESSION_CANDLES)
@@ -517,6 +535,7 @@ class BotRunner:
             candles,
             latest_processed_candle_ts=state.last_processed_candle_ts,
             bar_size=self.settings.market_data.bar_size,
+            candle_close_buffer_seconds=self.settings.market_data.candle_close_buffer_seconds,
         )
         account_snapshot = await AccountReader(ib, client_id=self.settings.ib.client_id).read_snapshot()
         health_report = self._run_health_checks(
@@ -681,6 +700,25 @@ def _required_active_trade_int(active_trade: dict[str, Any], name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise BotRunnerError(f"Active trade {name} must be a positive integer for runtime recovery.")
     return value
+
+
+def _format_candle_gaps(gaps: tuple[Any, ...]) -> str:
+    parts = []
+    for gap in gaps[:5]:
+        parts.append(
+            "previous={previous} next={next} missing_from={missing_from} missing_to={missing_to} missing_count={count}".format(
+                previous=getattr(gap, "previous_timestamp", None),
+                next=getattr(gap, "next_timestamp", None),
+                missing_from=getattr(gap, "missing_from", None),
+                missing_to=getattr(gap, "missing_to", None),
+                count=getattr(gap, "missing_count", None),
+            )
+        )
+
+    if len(gaps) > 5:
+        parts.append(f"... {len(gaps) - 5} more gap(s)")
+
+    return "; ".join(parts)
 
 
 def _runtime_delta_duration(settings: Any) -> str:

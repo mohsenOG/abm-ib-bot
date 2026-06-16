@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -31,6 +31,7 @@ class CandleStoreUpdate:
     rows_stored: int
     latest_closed_candle_ts: pd.Timestamp | None
     gaps: tuple[CandleGap, ...]
+    rows_dropped_unfinished: int = 0
 
 
 class CandleStore:
@@ -42,10 +43,12 @@ class CandleStore:
         *,
         bar_size: str,
         latest_processed_candle_ts: Any | None = None,
+        candle_close_buffer_seconds: float = 0,
     ) -> None:
         self._candles = _empty_candle_frame()
         self._candle_interval = bar_size_to_timedelta(bar_size)
         self._latest_processed_candle_ts = _optional_timestamp(latest_processed_candle_ts)
+        self._close_buffer = _non_negative_timedelta(candle_close_buffer_seconds, "candle_close_buffer_seconds")
 
         if candles is not None:
             self.update(candles)
@@ -60,18 +63,29 @@ class CandleStore:
             return None
         return self._candles.iloc[-1][CANDLE_TIMESTAMP]
 
-    def update(self, candles: pd.DataFrame) -> CandleStoreUpdate:
+    def update(self, candles: pd.DataFrame, *, now: datetime | pd.Timestamp | None = None) -> CandleStoreUpdate:
         """Merge closed candles into the store and return update metadata."""
 
         clean_new_candles = _clean_candles(candles)
         if not clean_new_candles.empty:
             self._candles = _merge_candles(self._candles, clean_new_candles)
 
+        rows_before_closed_filter = len(self._candles)
+        self._candles = _closed_candles_only(
+            self._candles,
+            candle_interval=self._candle_interval,
+            close_buffer=self._close_buffer,
+            now=now,
+        )
+        rows_dropped_unfinished = rows_before_closed_filter - len(self._candles)
+        _validate_candle_spacing(self._candles, self._candle_interval)
+
         return CandleStoreUpdate(
             rows_received=len(candles),
             rows_stored=len(self._candles),
             latest_closed_candle_ts=self.latest_closed_candle_ts,
             gaps=self.detect_missing_candles(),
+            rows_dropped_unfinished=rows_dropped_unfinished,
         )
 
     def get_candles(self) -> pd.DataFrame:
@@ -150,6 +164,22 @@ def _merge_candles(current: pd.DataFrame, new_candles: pd.DataFrame) -> pd.DataF
     return merged.loc[:, REQUIRED_CANDLE_COLUMNS]
 
 
+def _closed_candles_only(
+    candles: pd.DataFrame,
+    *,
+    candle_interval: pd.Timedelta,
+    close_buffer: pd.Timedelta,
+    now: datetime | pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    if candles.empty:
+        return candles
+
+    current_time = _normalize_now(now)
+    candle_end = candles[CANDLE_TIMESTAMP] + candle_interval + close_buffer
+    closed = candles.loc[candle_end <= current_time].copy()
+    return closed.reset_index(drop=True)
+
+
 def _clean_candles(candles: pd.DataFrame) -> pd.DataFrame:
     if not isinstance(candles, pd.DataFrame):
         raise CandleStoreError("Candles must be provided as a pandas DataFrame.")
@@ -209,6 +239,25 @@ def _detect_missing_candles(candles: pd.DataFrame, candle_interval: pd.Timedelta
     return tuple(gaps)
 
 
+def _validate_candle_spacing(candles: pd.DataFrame, candle_interval: pd.Timedelta) -> None:
+    if len(candles) < 2:
+        return
+
+    timestamps = list(candles[CANDLE_TIMESTAMP])
+    for previous_timestamp, next_timestamp in zip(timestamps, timestamps[1:]):
+        delta = next_timestamp - previous_timestamp
+        if delta < candle_interval:
+            raise CandleStoreError(
+                f"Candle spacing is shorter than configured interval: "
+                f"previous={previous_timestamp} next={next_timestamp} delta={delta}."
+            )
+        if delta % candle_interval != pd.Timedelta(0):
+            raise CandleStoreError(
+                f"Candle spacing is not aligned to configured interval: "
+                f"previous={previous_timestamp} next={next_timestamp} delta={delta}."
+            )
+
+
 def _empty_candle_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=REQUIRED_CANDLE_COLUMNS)
 
@@ -226,6 +275,14 @@ def _optional_timestamp(value: Any | None) -> pd.Timestamp | None:
     return _required_timestamp(value, "latest_processed_candle_ts")
 
 
+def _non_negative_timedelta(value: Any, name: str) -> pd.Timedelta:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CandleStoreError(f"{name} must be a non-negative number.")
+    if value < 0:
+        raise CandleStoreError(f"{name} must be zero or greater.")
+    return pd.Timedelta(seconds=float(value))
+
+
 def _normalize_timestamp(value: Any) -> pd.Timestamp | pd.NaT:
     if value is None:
         return pd.NaT
@@ -241,4 +298,11 @@ def _normalize_timestamp(value: Any) -> pd.Timestamp | pd.NaT:
     if timestamp.tzinfo is None:
         return timestamp.tz_localize(timezone.utc)
 
+    return timestamp.tz_convert(timezone.utc)
+
+
+def _normalize_now(value: datetime | pd.Timestamp | None) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value if value is not None else datetime.now(timezone.utc))
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize(timezone.utc)
     return timestamp.tz_convert(timezone.utc)
