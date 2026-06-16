@@ -6,13 +6,14 @@ import argparse
 import asyncio
 from contextlib import suppress
 from dataclasses import asdict, dataclass, is_dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from config.settings import AppSettings, load_settings
 from data.candle_store import CandleStore
+from data.market_calendar import MarketCalendar, MarketCalendarError
 from data.market_data import HistoricalDataRequest, MarketDataClient
 from domain.constants import (
     ALERT_ONLY_MODE,
@@ -59,6 +60,7 @@ class NotificationDeliveryError(RuntimeError):
 class RuntimeRecovery:
     ib: Any
     signal_contract: Any
+    market_calendar: MarketCalendar
     state: BotState
 
 
@@ -115,6 +117,8 @@ class BotRunner:
         )
         self.ib_connection = IBConnection(self.settings)
         self._candle_store: CandleStore | None = None
+        self._market_calendar: MarketCalendar | None = None
+        self._market_calendar_refresh_date = None
 
         _validate_mode_startup(self.settings)
 
@@ -131,6 +135,11 @@ class BotRunner:
 
             await self._run_account_guard(ib=ib, state=state)
             signal_contract = await qualify_contract(ib, build_signal_contract(self.settings))
+            await self._refresh_signal_market_calendar(
+                ib=ib,
+                signal_contract=signal_contract,
+                reason="startup",
+            )
 
             if self.settings.trading.mode == LIVE_MODE:
                 await self._run_live_preflight_and_stop(ib=ib, signal_contract=signal_contract, state=state)
@@ -229,10 +238,16 @@ class BotRunner:
                 recovered_state = self.state_store.load()
                 await self._run_recovery_account_checks(ib=ib, state=recovered_state)
                 signal_contract = await qualify_contract(ib, build_signal_contract(self.settings))
+                market_calendar = await self._refresh_signal_market_calendar(
+                    ib=ib,
+                    signal_contract=signal_contract,
+                    reason="runtime_recovery",
+                )
                 await self._requalify_active_product_contract(ib=ib, state=recovered_state)
                 latest_market_data_ts = await self._refresh_recovery_candle_delta(
                     ib=ib,
                     signal_contract=signal_contract,
+                    market_calendar=market_calendar,
                     state=recovered_state,
                 )
                 health_report = self._run_health_checks(
@@ -257,7 +272,12 @@ class BotRunner:
                 continue
 
             self.logger.info("Runtime recovery completed. attempt=%s/%s", attempt, max_attempts)
-            return RuntimeRecovery(ib=ib, signal_contract=signal_contract, state=recovered_state)
+            return RuntimeRecovery(
+                ib=ib,
+                signal_contract=signal_contract,
+                market_calendar=market_calendar,
+                state=recovered_state,
+            )
 
         raise BotRunnerError(f"Runtime recovery exhausted {max_attempts} attempt(s): {last_error}") from last_error
 
@@ -287,6 +307,7 @@ class BotRunner:
         *,
         ib: Any,
         signal_contract: Any,
+        market_calendar: MarketCalendar,
         state: BotState,
     ) -> Any | None:
         delta_duration = _runtime_delta_duration(self.settings)
@@ -301,8 +322,15 @@ class BotRunner:
             candle_close_buffer_seconds=self.settings.market_data.candle_close_buffer_seconds,
         )
         update = candle_store.update(candles)
-        if update.gaps:
-            self.logger.warning("Runtime recovery candle refresh detected gaps. gaps=%s", len(update.gaps))
+        validation = self._validate_candle_gaps_with_calendar(
+            candle_store=candle_store,
+            gaps=update.gaps,
+            market_calendar=market_calendar,
+        )
+        self._log_candle_gap_validation(validation)
+        if not validation.signal_processing_allowed:
+            details = _format_missing_bars(validation.unexpected_data_gaps)
+            raise BotRunnerError(f"Runtime recovery candle refresh has unexpected open-session gaps: {details}")
         return update.latest_closed_candle_ts
 
     def _create_active_trade_monitor_task(self, *, ib: Any, once: bool) -> asyncio.Task[Any] | None:
@@ -319,6 +347,10 @@ class BotRunner:
         return asyncio.create_task(monitor.run_forever(), name="active-trade-monitor")
 
     async def _run_cycle(self, *, ib: Any, signal_contract: Any, state: BotState) -> BotState:
+        market_calendar = await self._refresh_signal_market_calendar_if_due(
+            ib=ib,
+            signal_contract=signal_contract,
+        )
         candle_store, update, request_scope = await self._fetch_and_update_candle_store(
             ib=ib,
             signal_contract=signal_contract,
@@ -326,7 +358,7 @@ class BotRunner:
         )
 
         self.logger.info(
-            "Candle store updated. request_scope=%s rows_received=%s rows_stored=%s latest_closed=%s gaps=%s dropped_unfinished=%s",
+            "Candle store updated. request_scope=%s rows_received=%s rows_stored=%s latest_closed=%s raw_gaps=%s dropped_unfinished=%s",
             request_scope,
             update.rows_received,
             update.rows_stored,
@@ -339,16 +371,17 @@ class BotRunner:
             self._run_health_checks(ib=ib, state=state, latest_market_data_ts=None)
             return state
 
-        if update.gaps:
-            gap_summary = _format_candle_gaps(update.gaps)
-            self.logger.warning(
-                "Candle gap detected after cache merge; signal processing blocked. gaps=%s details=%s",
-                len(update.gaps),
-                gap_summary,
-            )
+        validation = self._validate_candle_gaps_with_calendar(
+            candle_store=candle_store,
+            gaps=update.gaps,
+            market_calendar=market_calendar,
+        )
+        self._log_candle_gap_validation(validation)
+        if not validation.signal_processing_allowed:
+            gap_summary = _format_missing_bars(validation.unexpected_data_gaps)
             await self._notify(
                 "send_critical_error",
-                message="Candle gap blocked signal processing",
+                message="Unexpected open-session candle gap blocked signal processing",
                 details=gap_summary,
             )
             self._run_health_checks(ib=ib, state=state, latest_market_data_ts=update.latest_closed_candle_ts)
@@ -431,6 +464,98 @@ class BotRunner:
         update = self._candle_store.update(candles)
         self._candle_store.trim_to_latest(MAX_SESSION_CANDLES)
         return self._candle_store, update, "delta"
+
+    async def _refresh_signal_market_calendar_if_due(self, *, ib: Any, signal_contract: Any) -> MarketCalendar:
+        market_calendar = self._market_calendar
+        refresh_date = self._market_calendar_refresh_date
+        today_utc = datetime.now(timezone.utc).date()
+        if market_calendar is not None and refresh_date == today_utc:
+            return market_calendar
+
+        reason = "daily_refresh" if market_calendar is not None else "initial_refresh"
+        return await self._refresh_signal_market_calendar(
+            ib=ib,
+            signal_contract=signal_contract,
+            reason=reason,
+        )
+
+    async def _refresh_signal_market_calendar(
+        self,
+        *,
+        ib: Any,
+        signal_contract: Any,
+        reason: str,
+    ) -> MarketCalendar:
+        try:
+            contract_details = await ib.reqContractDetailsAsync(signal_contract)
+        except Exception as exc:
+            self.logger.exception("Failed to fetch XAUUSD IBKR ContractDetails for market calendar.")
+            raise BotRunnerError("Signal processing blocked: could not fetch XAUUSD IBKR market calendar.") from exc
+
+        try:
+            contract_details_count = len(contract_details)
+        except TypeError as exc:
+            self.logger.error("Invalid XAUUSD IBKR ContractDetails response for market calendar.")
+            raise BotRunnerError("Signal processing blocked: XAUUSD IBKR market calendar response was invalid.") from exc
+
+        if contract_details_count != 1:
+            self.logger.error(
+                "Invalid XAUUSD IBKR ContractDetails result count for market calendar. count=%s",
+                contract_details_count,
+            )
+            raise BotRunnerError("Signal processing blocked: XAUUSD IBKR market calendar result was not unique.")
+
+        try:
+            market_calendar = MarketCalendar.from_contract_details(contract_details[0])
+        except MarketCalendarError as exc:
+            self.logger.error("Invalid XAUUSD IBKR market calendar. error=%s", exc)
+            raise BotRunnerError(f"Signal processing blocked: invalid XAUUSD IBKR market calendar: {exc}") from exc
+
+        self._market_calendar = market_calendar
+        self._market_calendar_refresh_date = market_calendar.refreshed_at_utc.date()
+        self.logger.info(
+            "XAUUSD IBKR market calendar refreshed. reason=%s time_zone_id=%s trading_sessions=%s liquid_sessions=%s refreshed_at_utc=%s",
+            reason,
+            market_calendar.time_zone_id,
+            len(market_calendar.trading_sessions),
+            len(market_calendar.liquid_sessions),
+            market_calendar.refreshed_at_utc,
+        )
+        self.logger.info(
+            "XAUUSD IBKR upcoming opening hours. reason=%s time_zone_id=%s table_utc=\n%s",
+            reason,
+            market_calendar.time_zone_id,
+            market_calendar.format_opening_hours_table(days=5),
+        )
+        return market_calendar
+
+    def _validate_candle_gaps_with_calendar(
+        self,
+        *,
+        candle_store: CandleStore,
+        gaps: tuple[Any, ...],
+        market_calendar: MarketCalendar | None,
+    ) -> Any:
+        if market_calendar is None:
+            self.logger.error("Candle gap validation failed: XAUUSD IBKR market calendar is unavailable.")
+            raise BotRunnerError("Signal processing blocked: XAUUSD IBKR market calendar is unavailable.")
+        return market_calendar.validate_candle_gaps(gaps, candle_store.candle_interval)
+
+    def _log_candle_gap_validation(self, validation: Any) -> None:
+        self.logger.info(
+            "Candle gap validation completed. expected_session_gaps=%s unexpected_data_gaps=%s signal_processing_allowed=%s",
+            len(validation.expected_session_gaps),
+            len(validation.unexpected_data_gaps),
+            validation.signal_processing_allowed,
+        )
+        for missing_bar in validation.unexpected_data_gaps:
+            self.logger.warning(
+                "Unexpected candle gap detail. previous_candle=%s next_candle=%s missing_timestamp=%s reason=%s",
+                missing_bar.previous_timestamp,
+                missing_bar.next_timestamp,
+                missing_bar.missing_timestamp,
+                missing_bar.reason,
+            )
 
     def _calculate_latest_signal(self, candle_store: CandleStore, state: BotState) -> Signal | None:
         candles = candle_store.get_candles()
@@ -707,21 +832,20 @@ def _required_active_trade_int(active_trade: dict[str, Any], name: str) -> int:
     return value
 
 
-def _format_candle_gaps(gaps: tuple[Any, ...]) -> str:
+def _format_missing_bars(missing_bars: tuple[Any, ...]) -> str:
     parts = []
-    for gap in gaps[:5]:
+    for missing_bar in missing_bars[:5]:
         parts.append(
-            "previous={previous} next={next} missing_from={missing_from} missing_to={missing_to} missing_count={count}".format(
-                previous=getattr(gap, "previous_timestamp", None),
-                next=getattr(gap, "next_timestamp", None),
-                missing_from=getattr(gap, "missing_from", None),
-                missing_to=getattr(gap, "missing_to", None),
-                count=getattr(gap, "missing_count", None),
+            "previous={previous} next={next} missing_timestamp={missing_timestamp} reason={reason}".format(
+                previous=getattr(missing_bar, "previous_timestamp", None),
+                next=getattr(missing_bar, "next_timestamp", None),
+                missing_timestamp=getattr(missing_bar, "missing_timestamp", None),
+                reason=getattr(missing_bar, "reason", None),
             )
         )
 
-    if len(gaps) > 5:
-        parts.append(f"... {len(gaps) - 5} more gap(s)")
+    if len(missing_bars) > 5:
+        parts.append(f"... {len(missing_bars) - 5} more missing bar(s)")
 
     return "; ".join(parts)
 

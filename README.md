@@ -29,6 +29,9 @@ Do not put real secrets in `settings.yml` or `.env.example`.
 Relative paths in `settings.yml`, including `execution.products_file`, `logger.file_path`, `paths.state_file`, and `paths.trade_journal_file`, are resolved against the project root. `execution.products_file` points to the curated execution-products JSON. Product identifiers and account-specific values are expected to be filled per deployment; the loader validates shape and supported product type, not whether a real broker ID is correct.
 
 `market_data.bar_size` currently supports only `1 hour`, matching the fixed strategy model. The historical duration, IB `whatToShow`, RTH flag, and candle-close buffer are configured under `market_data`.
+After XAUUSD qualification, the runner fetches IBKR contract details and builds a UTC market calendar from `tradingHours`. Candle gap validation uses that trading-hours calendar so normal daily and weekend closures do not block signals, while missing candles during open trading sessions still block signal processing. `liquidHours` is fetched, parsed, and refreshed with the same contract details for later execution-session use, but it is not used as a fallback for signal candle validation.
+
+The XAUUSD IBKR calendar is refreshed at startup, after runtime reconnect/recovery, and once per UTC date during the normal polling loop before candle data is validated. Each refresh logs a UTC table of the next five dates' parsed `tradingHours` and `liquidHours` opening windows. If contract details cannot be fetched, are not unique, or contain an invalid calendar, signal processing fails closed until a valid calendar is available.
 
 Execution behavior is configured under `execution`. Entry orders currently support only `market`; unsupported order types are rejected during settings load.
 

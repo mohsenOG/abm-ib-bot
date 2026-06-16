@@ -63,6 +63,10 @@ class CandleStore:
             return None
         return self._candles.iloc[-1][CANDLE_TIMESTAMP]
 
+    @property
+    def candle_interval(self) -> pd.Timedelta:
+        return self._candle_interval
+
     def update(self, candles: pd.DataFrame, *, now: datetime | pd.Timestamp | None = None) -> CandleStoreUpdate:
         """Merge closed candles into the store and return update metadata."""
 
