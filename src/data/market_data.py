@@ -28,6 +28,9 @@ class MarketDataError(RuntimeError):
     """Raised when market data cannot be fetched or normalized safely."""
 
 
+IB_HISTORICAL_DURATION_UNITS = frozenset({"S", "D", "W", "M", "Y"})
+
+
 @dataclass(frozen=True)
 class HistoricalDataRequest:
     end_datetime: str = ""
@@ -61,11 +64,13 @@ class MarketDataClient:
         ib = self._connected_ib()
         data_request = request if request is not None else HistoricalDataRequest()
         _validate_request(data_request)
+        duration = _duration_str(data_request, self._settings.historical_duration)
+        _validate_duration_str(duration)
 
         self._logger.info(
             "Requesting IB historical bars. bar_size=%s duration=%s what_to_show=%s use_rth=%s",
             self._settings.bar_size,
-            _duration_str(data_request, self._settings.historical_duration),
+            duration,
             self._settings.what_to_show,
             self._settings.use_rth,
         )
@@ -74,7 +79,7 @@ class MarketDataClient:
             bars = await ib.reqHistoricalDataAsync(
                 contract,
                 endDateTime=data_request.end_datetime,
-                durationStr=_duration_str(data_request, self._settings.historical_duration),
+                durationStr=duration,
                 barSizeSetting=self._settings.bar_size,
                 whatToShow=self._settings.what_to_show,
                 useRTH=self._settings.use_rth,
@@ -144,6 +149,26 @@ def _validate_request(request: HistoricalDataRequest) -> None:
 
 def _duration_str(request: HistoricalDataRequest, default: str) -> str:
     return request.duration_str.strip() if request.duration_str is not None else default
+
+
+def _validate_duration_str(value: str) -> None:
+    parts = value.strip().split()
+    if len(parts) != 2:
+        raise MarketDataError("Historical data duration must use '<positive integer> <unit>', for example '1 D'.")
+
+    quantity_text, unit_text = parts
+    try:
+        quantity = int(quantity_text)
+    except ValueError as exc:
+        raise MarketDataError("Historical data duration quantity must be a positive integer.") from exc
+
+    if quantity <= 0:
+        raise MarketDataError("Historical data duration quantity must be a positive integer.")
+
+    unit = unit_text.upper()
+    if unit not in IB_HISTORICAL_DURATION_UNITS:
+        allowed = ", ".join(sorted(IB_HISTORICAL_DURATION_UNITS))
+        raise MarketDataError(f"Historical data duration unit must be one of: {allowed}.")
 
 
 def _bars_to_frame(bars: Any) -> pd.DataFrame:

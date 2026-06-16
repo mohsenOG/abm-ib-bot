@@ -1111,14 +1111,12 @@ def _ib_duration_to_timedelta(value: str, name: str) -> pd.Timedelta:
     unit = unit_text.upper()
     if unit == "S":
         return pd.Timedelta(seconds=quantity)
-    if unit == "H":
-        return pd.Timedelta(hours=quantity)
     if unit == "D":
         return pd.Timedelta(days=quantity)
     if unit == "W":
         return pd.Timedelta(weeks=quantity)
 
-    raise BotRunnerError(f"{name} unit must be one of S, H, D, or W for centered gap backfill.")
+    raise BotRunnerError(f"{name} unit must be one of S, D, or W for centered gap backfill.")
 
 
 def _required_utc_timestamp(value: Any, name: str) -> pd.Timestamp:
@@ -1156,7 +1154,7 @@ def _format_missing_bars(missing_bars: tuple[Any, ...]) -> str:
 def _runtime_delta_duration(settings: Any) -> str:
     poll_seconds = int(getattr(getattr(settings, "runtime", None), "poll_seconds", 300) or 300)
     hours = max(6, int(poll_seconds // 3600) + 3)
-    return f"{hours} H"
+    return f"{hours * 3600} S"
 
 
 def _market_data_settings_with_duration(source: Any, duration: str) -> Any:

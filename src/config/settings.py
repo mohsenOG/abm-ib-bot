@@ -20,6 +20,8 @@ from ib_gateway.constants import (
 
 MARKET_ENTRY_ORDER_TYPE = "market"
 SUPPORTED_ENTRY_ORDER_TYPES = {MARKET_ENTRY_ORDER_TYPE}
+IB_HISTORICAL_DURATION_UNITS = frozenset({"S", "D", "W", "M", "Y"})
+EXACT_IB_HISTORICAL_DURATION_UNITS = frozenset({"S", "D", "W"})
 
 
 class SettingsValidationError(ValueError):
@@ -298,6 +300,16 @@ def _load_market_data(raw: dict[str, Any]) -> MarketDataSettings:
         raise SettingsValidationError("market_data.candle_close_buffer_seconds must be zero or greater.")
     if gap_block_recent_bars <= 0:
         raise SettingsValidationError("market_data.gap_block_recent_bars must be greater than zero.")
+    _validate_ib_duration(
+        historical_duration,
+        "market_data.historical_duration",
+        allowed_units=IB_HISTORICAL_DURATION_UNITS,
+    )
+    _validate_ib_duration(
+        gap_backfill_duration,
+        "market_data.gap_backfill_duration",
+        allowed_units=EXACT_IB_HISTORICAL_DURATION_UNITS,
+    )
 
     return MarketDataSettings(
         bar_size=bar_size,
@@ -738,6 +750,26 @@ def _required_string(section: dict[str, Any], key: str, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise SettingsValidationError(f"{field_name} is required.")
     return value.strip()
+
+
+def _validate_ib_duration(value: str, field_name: str, *, allowed_units: frozenset[str]) -> None:
+    parts = value.strip().split()
+    if len(parts) != 2:
+        raise SettingsValidationError(f"{field_name} must use '<positive integer> <unit>', for example '1 D'.")
+
+    quantity_text, unit_text = parts
+    try:
+        quantity = int(quantity_text)
+    except ValueError as exc:
+        raise SettingsValidationError(f"{field_name} quantity must be a positive integer.") from exc
+
+    if quantity <= 0:
+        raise SettingsValidationError(f"{field_name} quantity must be a positive integer.")
+
+    unit = unit_text.upper()
+    if unit not in allowed_units:
+        allowed = ", ".join(sorted(allowed_units))
+        raise SettingsValidationError(f"{field_name} unit must be one of: {allowed}.")
 
 
 def _required_nullable_string(section: dict[str, Any], key: str, field_name: str) -> str | None:
