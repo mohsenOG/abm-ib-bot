@@ -17,6 +17,7 @@ from config.settings import AppSettings, load_settings
 from data.candle_store import CandleStore
 from data.market_calendar import MarketCalendar, MarketCalendarError
 from data.market_data import HistoricalDataRequest, MarketDataClient
+from data.schema import CANDLE_TIMESTAMP
 from domain.constants import (
     ALERT_ONLY_MODE,
     EXECUTION_SIDE_LONG,
@@ -67,6 +68,14 @@ class RuntimeRecovery:
 
 
 @dataclass(frozen=True)
+class CandleCycleResult:
+    state: BotState
+    latest_market_data_ts: pd.Timestamp | None
+    expected_candle_available: bool
+    processed_candle_count: int
+
+
+@dataclass(frozen=True)
 class CandleGapImpactValidation:
     validation: Any
     blocking_unexpected_data_gaps: tuple[Any, ...]
@@ -108,7 +117,10 @@ def main() -> int:
 
     if args.command == "run":
         runner = BotRunner(settings_file=args.settings, env_file=args.env_file)
-        asyncio.run(runner.run(once=args.once))
+        try:
+            asyncio.run(runner.run(once=args.once))
+        except KeyboardInterrupt:
+            return 130
         return 0
 
     raise BotRunnerError(f"Unsupported command: {args.command}")
@@ -157,6 +169,7 @@ class BotRunner:
 
         try:
             ib = await self.ib_connection.connect()
+            await self._log_ib_clock_advisory(ib=ib, reason="startup")
             await self._notify("send_ib_connected")
 
             await self._run_account_guard(ib=ib, state=state)
@@ -183,11 +196,20 @@ class BotRunner:
     async def _run_loop(self, *, ib: Any, signal_contract: Any, state: BotState, once: bool) -> None:
         monitor_task = self._create_active_trade_monitor_task(ib=ib, once=once)
         try:
-            while True:
+            async def execute_cycle(expected_candle_close_ts: pd.Timestamp | None) -> CandleCycleResult:
+                nonlocal ib, signal_contract, state, monitor_task
+
                 state = self.state_store.load()
                 try:
-                    state = await self._run_cycle(ib=ib, signal_contract=signal_contract, state=state)
+                    result = await self._run_cycle(
+                        ib=ib,
+                        signal_contract=signal_contract,
+                        state=state,
+                        expected_candle_close_ts=expected_candle_close_ts,
+                    )
+                    state = result.state
                     self.health_monitor.clear_errors()
+                    return result
                 except Exception:
                     error_check = self.health_monitor.record_error()
                     self.logger.exception("Bot cycle failed. repeated_errors=%s", self.health_monitor.repeated_errors)
@@ -219,11 +241,41 @@ class BotRunner:
                         message="Runtime recovery completed",
                         details="IB session, account guard, reconciliation, contracts, and market data refreshed.",
                     )
+                    return CandleCycleResult(
+                        state=state,
+                        latest_market_data_ts=None,
+                        expected_candle_available=False,
+                        processed_candle_count=0,
+                    )
 
-                if once:
-                    return
+            await execute_cycle(expected_candle_close_ts=None)
+            if once:
+                return
 
-                await asyncio.sleep(self.settings.runtime.poll_seconds)
+            while True:
+                expected_candle_close_ts = await self._sleep_until_next_candle_close()
+                result = await execute_cycle(expected_candle_close_ts=expected_candle_close_ts)
+                if result.expected_candle_available:
+                    continue
+
+                for attempt in range(1, self.settings.runtime.bar_retry_attempts + 1):
+                    self.logger.info(
+                        "Expected candle not available; retrying. expected_close=%s attempt=%s/%s retry_seconds=%s",
+                        expected_candle_close_ts,
+                        attempt,
+                        self.settings.runtime.bar_retry_attempts,
+                        self.settings.runtime.bar_retry_seconds,
+                    )
+                    await asyncio.sleep(self.settings.runtime.bar_retry_seconds)
+                    result = await execute_cycle(expected_candle_close_ts=expected_candle_close_ts)
+                    if result.expected_candle_available:
+                        break
+                else:
+                    self.logger.info(
+                        "Expected candle still unavailable after retries. expected_close=%s attempts=%s",
+                        expected_candle_close_ts,
+                        self.settings.runtime.bar_retry_attempts,
+                    )
         finally:
             await self._cancel_active_trade_monitor_task(monitor_task)
 
@@ -235,6 +287,48 @@ class BotRunner:
         with suppress(asyncio.CancelledError):
             await monitor_task
         return None
+
+    async def _sleep_until_next_candle_close(self) -> pd.Timestamp:
+        close_time = _next_utc_candle_close_time(
+            candle_close_buffer_seconds=self.settings.runtime.candle_close_buffer_seconds,
+        )
+        wake_time = close_time + pd.Timedelta(seconds=self.settings.runtime.candle_close_buffer_seconds)
+        now = pd.Timestamp(datetime.now(timezone.utc))
+        sleep_seconds = max(0.0, (wake_time - now).total_seconds())
+        self.logger.info(
+            "Waiting for next candle close. expected_close=%s wake_time=%s sleep_seconds=%.3f",
+            close_time,
+            wake_time,
+            sleep_seconds,
+        )
+        await asyncio.sleep(sleep_seconds)
+        return close_time
+
+    async def _log_ib_clock_advisory(self, *, ib: Any, reason: str) -> None:
+        if not self.settings.runtime.clock_advisory_enabled:
+            return
+
+        try:
+            local_before = datetime.now(timezone.utc)
+            ib_server_time = await ib.reqCurrentTimeAsync()
+            local_after = datetime.now(timezone.utc)
+            local_utc = pd.Timestamp(local_before + ((local_after - local_before) / 2)).tz_convert(timezone.utc)
+            ib_server_utc = _required_utc_timestamp(ib_server_time, "ib_server_utc")
+            drift_ms = int(round((ib_server_utc - local_utc).total_seconds() * 1000))
+        except Exception as exc:
+            self.logger.info("IBKR clock drift advisory unavailable. reason=%s error=%s", reason, exc)
+            return
+
+        log_method = self.logger.info
+        if abs(drift_ms) >= self.settings.runtime.clock_advisory_warn_ms:
+            log_method = self.logger.warning
+        log_method(
+            "IBKR clock drift advisory. reason=%s local_utc=%s ib_server_utc=%s drift_ms=%s",
+            reason,
+            local_utc.isoformat(),
+            ib_server_utc.isoformat(),
+            drift_ms,
+        )
 
     async def _recover_runtime(self, *, state: BotState, cause: str) -> RuntimeRecovery:
         max_attempts = max(1, self.health_monitor.repeated_error_limit)
@@ -259,6 +353,7 @@ class BotRunner:
 
             try:
                 ib = await self.ib_connection.reconnect()
+                await self._log_ib_clock_advisory(ib=ib, reason="reconnect")
                 await self._notify("send_ib_connected", "IB reconnected during runtime recovery")
 
                 recovered_state = self.state_store.load()
@@ -338,14 +433,18 @@ class BotRunner:
     ) -> Any | None:
         delta_duration = _runtime_delta_duration(self.settings)
         delta_settings = _market_data_settings_with_duration(self.settings.market_data, delta_duration)
-        candles = await MarketDataClient(ib, settings=delta_settings).fetch_historical_bars(
+        candles = await MarketDataClient(
+            ib,
+            settings=delta_settings,
+            candle_close_buffer_seconds=self.settings.runtime.candle_close_buffer_seconds,
+        ).fetch_historical_bars(
             signal_contract,
             request=HistoricalDataRequest(duration_str=delta_duration),
         )
         candle_store = CandleStore(
             latest_processed_candle_ts=state.last_processed_candle_ts,
             bar_size=self.settings.market_data.bar_size,
-            candle_close_buffer_seconds=self.settings.market_data.candle_close_buffer_seconds,
+            candle_close_buffer_seconds=self.settings.runtime.candle_close_buffer_seconds,
         )
         update = candle_store.update(candles)
         gap_impact = await self._repair_and_validate_candle_gaps(
@@ -374,7 +473,14 @@ class BotRunner:
         )
         return asyncio.create_task(monitor.run_forever(), name="active-trade-monitor")
 
-    async def _run_cycle(self, *, ib: Any, signal_contract: Any, state: BotState) -> BotState:
+    async def _run_cycle(
+        self,
+        *,
+        ib: Any,
+        signal_contract: Any,
+        state: BotState,
+        expected_candle_close_ts: pd.Timestamp | None = None,
+    ) -> CandleCycleResult:
         market_calendar = await self._refresh_signal_market_calendar_if_due(
             ib=ib,
             signal_contract=signal_contract,
@@ -395,9 +501,32 @@ class BotRunner:
             update.rows_dropped_unfinished,
         )
 
+        expected_candle_ts = None
+        if expected_candle_close_ts is not None:
+            expected_candle_ts = _expected_candle_timestamp(
+                expected_candle_close_ts,
+                candle_interval=candle_store.candle_interval,
+            )
+        expected_candle_available = expected_candle_ts is None or _candle_store_contains_timestamp(
+            candle_store,
+            expected_candle_ts,
+        )
+        if expected_candle_ts is not None and not expected_candle_available:
+            self.logger.info(
+                "Expected closed candle is not available yet. expected_close=%s expected_candle=%s latest_closed=%s",
+                expected_candle_close_ts,
+                expected_candle_ts,
+                update.latest_closed_candle_ts,
+            )
+
         if update.latest_closed_candle_ts is None:
             self._run_health_checks(ib=ib, state=state, latest_market_data_ts=None)
-            return state
+            return CandleCycleResult(
+                state=state,
+                latest_market_data_ts=None,
+                expected_candle_available=expected_candle_available,
+                processed_candle_count=0,
+            )
 
         gap_impact = await self._repair_and_validate_candle_gaps(
             ib=ib,
@@ -408,6 +537,8 @@ class BotRunner:
         )
         self._log_candle_gap_impact_validation(gap_impact, market_calendar=market_calendar, candle_store=candle_store)
         latest_market_data_ts = candle_store.latest_closed_candle_ts
+        if expected_candle_ts is not None:
+            expected_candle_available = _candle_store_contains_timestamp(candle_store, expected_candle_ts)
         if not gap_impact.signal_processing_allowed:
             gap_summary = _format_missing_bars(gap_impact.blocking_unexpected_data_gaps)
             await self._notify(
@@ -416,55 +547,99 @@ class BotRunner:
                 details=gap_summary,
             )
             self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_market_data_ts)
-            return state
+            return CandleCycleResult(
+                state=state,
+                latest_market_data_ts=latest_market_data_ts,
+                expected_candle_available=expected_candle_available,
+                processed_candle_count=0,
+            )
+
+        if request_scope == "warmup":
+            latest_closed_ts = candle_store.latest_closed_candle_ts
+            if latest_closed_ts is not None:
+                previous_processed_ts = state.last_processed_candle_ts
+                candle_store.mark_processed(latest_closed_ts)
+                state.last_processed_candle_ts = latest_closed_ts.isoformat()
+                self.state_store.save(state)
+                self.logger.info(
+                    "Initialized candle processing baseline. previous_processed=%s latest_closed=%s historical_signals_skipped=True",
+                    previous_processed_ts,
+                    latest_closed_ts,
+                )
+            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_market_data_ts)
+            return CandleCycleResult(
+                state=state,
+                latest_market_data_ts=latest_market_data_ts,
+                expected_candle_available=expected_candle_available,
+                processed_candle_count=0,
+            )
 
         if not candle_store.has_new_closed_candle():
             self.logger.info("No new closed candle to process.")
             self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_market_data_ts)
-            return state
-
-        try:
-            signal = self._calculate_latest_signal(candle_store, state)
-        except StrategySignalNotReadyError as exc:
-            latest_closed_ts = candle_store.latest_closed_candle_ts
-            self.logger.warning("Signal processing blocked until warmup is complete. reason=%s", exc)
-            await self._notify(
-                "send_critical_error",
-                message="Strategy warmup blocked signal processing",
-                details=str(exc),
+            return CandleCycleResult(
+                state=state,
+                latest_market_data_ts=latest_market_data_ts,
+                expected_candle_available=expected_candle_available,
+                processed_candle_count=0,
             )
-            if latest_closed_ts is not None:
-                candle_store.mark_processed(latest_closed_ts)
-                state.last_processed_candle_ts = latest_closed_ts.isoformat()
-            self.state_store.save(state)
-            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_closed_ts)
-            return state
-        latest_closed_ts = candle_store.latest_closed_candle_ts
 
-        if latest_closed_ts is not None:
-            candle_store.mark_processed(latest_closed_ts)
-            state.last_processed_candle_ts = latest_closed_ts.isoformat()
+        processed_count = 0
+        warmup_notification_sent = False
+        new_closed_candles = candle_store.get_new_closed_candles()
+        for candle_ts in list(new_closed_candles[CANDLE_TIMESTAMP]):
+            try:
+                signal = self._calculate_signal_for_candle(candle_store, state, candle_ts)
+            except StrategySignalNotReadyError as exc:
+                self.logger.warning(
+                    "Signal processing blocked until warmup is complete. candle=%s reason=%s",
+                    candle_ts,
+                    exc,
+                )
+                if not warmup_notification_sent:
+                    await self._notify(
+                        "send_critical_error",
+                        message="Strategy warmup blocked signal processing",
+                        details=str(exc),
+                    )
+                    warmup_notification_sent = True
+                candle_store.mark_processed(candle_ts)
+                state.last_processed_candle_ts = candle_ts.isoformat()
+                self.state_store.save(state)
+                processed_count += 1
+                continue
 
-        if signal is None:
-            self.logger.info("No signal on latest closed candle.")
-            self.state_store.save(state)
-            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_closed_ts)
-            return state
+            candle_store.mark_processed(candle_ts)
+            state.last_processed_candle_ts = candle_ts.isoformat()
 
-        await self._record_signal(signal)
+            if signal is None:
+                self.logger.info("No signal on closed candle. candle=%s", candle_ts)
+                self.state_store.save(state)
+                processed_count += 1
+                continue
 
-        if self.settings.trading.mode == ALERT_ONLY_MODE:
-            state.last_signal_id = signal.signal_id
-            self.state_store.save(state)
-            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_closed_ts)
-            return state
+            await self._record_signal(signal)
 
-        if self.settings.trading.mode == PAPER_MODE:
-            state = await self._handle_paper_signal(ib=ib, signal=signal, state=state)
-            self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_closed_ts)
-            return state
+            if self.settings.trading.mode == ALERT_ONLY_MODE:
+                state.last_signal_id = signal.signal_id
+                self.state_store.save(state)
+                processed_count += 1
+                continue
 
-        raise BotRunnerError(f"Unsupported trading mode during cycle: {self.settings.trading.mode}")
+            if self.settings.trading.mode == PAPER_MODE:
+                state = await self._handle_paper_signal(ib=ib, signal=signal, state=state)
+                processed_count += 1
+                continue
+
+            raise BotRunnerError(f"Unsupported trading mode during cycle: {self.settings.trading.mode}")
+
+        self._run_health_checks(ib=ib, state=state, latest_market_data_ts=latest_market_data_ts)
+        return CandleCycleResult(
+            state=state,
+            latest_market_data_ts=latest_market_data_ts,
+            expected_candle_available=expected_candle_available,
+            processed_candle_count=processed_count,
+        )
 
     async def _fetch_and_update_candle_store(
         self,
@@ -474,13 +649,15 @@ class BotRunner:
         state: BotState,
     ) -> tuple[CandleStore, Any, str]:
         if getattr(self, "_candle_store", None) is None:
-            candles = await MarketDataClient(ib, settings=self.settings.market_data).fetch_historical_bars(
-                signal_contract
-            )
+            candles = await MarketDataClient(
+                ib,
+                settings=self.settings.market_data,
+                candle_close_buffer_seconds=self.settings.runtime.candle_close_buffer_seconds,
+            ).fetch_historical_bars(signal_contract)
             self._candle_store = CandleStore(
                 latest_processed_candle_ts=state.last_processed_candle_ts,
                 bar_size=self.settings.market_data.bar_size,
-                candle_close_buffer_seconds=self.settings.market_data.candle_close_buffer_seconds,
+                candle_close_buffer_seconds=self.settings.runtime.candle_close_buffer_seconds,
             )
             update = self._candle_store.update(candles)
             self._candle_store.trim_to_latest(MAX_SESSION_CANDLES)
@@ -488,7 +665,11 @@ class BotRunner:
 
         delta_duration = _runtime_delta_duration(self.settings)
         delta_settings = _market_data_settings_with_duration(self.settings.market_data, delta_duration)
-        candles = await MarketDataClient(ib, settings=delta_settings).fetch_historical_bars(
+        candles = await MarketDataClient(
+            ib,
+            settings=delta_settings,
+            candle_close_buffer_seconds=self.settings.runtime.candle_close_buffer_seconds,
+        ).fetch_historical_bars(
             signal_contract,
             request=HistoricalDataRequest(duration_str=delta_duration),
         )
@@ -621,7 +802,11 @@ class BotRunner:
         missing_bars = _unique_missing_bars(unexpected_data_gaps)
         attempted_count = 0
         rows_received = 0
-        client = MarketDataClient(ib, settings=self.settings.market_data)
+        client = MarketDataClient(
+            ib,
+            settings=self.settings.market_data,
+            candle_close_buffer_seconds=self.settings.runtime.candle_close_buffer_seconds,
+        )
 
         for missing_bar in missing_bars:
             missing_timestamp = _missing_bar_timestamp(missing_bar)
@@ -763,8 +948,10 @@ class BotRunner:
                 distance,
             )
 
-    def _calculate_latest_signal(self, candle_store: CandleStore, state: BotState) -> Signal | None:
+    def _calculate_signal_for_candle(self, candle_store: CandleStore, state: BotState, candle_ts: Any) -> Signal | None:
+        signal_candle_ts = _required_utc_timestamp(candle_ts, "candle_ts")
         candles = candle_store.get_candles()
+        candles = candles.loc[candles[CANDLE_TIMESTAMP] <= signal_candle_ts].reset_index(drop=True)
         minimum_rows = required_indicator_warmup_bars(atr_period=self.settings.strategy.atr_length)
         if len(candles) < minimum_rows:
             raise StrategySignalNotReadyError(
@@ -866,12 +1053,16 @@ class BotRunner:
         return updated_state
 
     async def _run_live_preflight_and_stop(self, *, ib: Any, signal_contract: Any, state: BotState) -> None:
-        candles = await MarketDataClient(ib, settings=self.settings.market_data).fetch_historical_bars(signal_contract)
+        candles = await MarketDataClient(
+            ib,
+            settings=self.settings.market_data,
+            candle_close_buffer_seconds=self.settings.runtime.candle_close_buffer_seconds,
+        ).fetch_historical_bars(signal_contract)
         candle_store = CandleStore(
             candles,
             latest_processed_candle_ts=state.last_processed_candle_ts,
             bar_size=self.settings.market_data.bar_size,
-            candle_close_buffer_seconds=self.settings.market_data.candle_close_buffer_seconds,
+            candle_close_buffer_seconds=self.settings.runtime.candle_close_buffer_seconds,
         )
         account_snapshot = await AccountReader(ib, client_id=self.settings.ib.client_id).read_snapshot()
         health_report = self._run_health_checks(
@@ -1151,10 +1342,34 @@ def _format_missing_bars(missing_bars: tuple[Any, ...]) -> str:
     return "; ".join(parts)
 
 
+def _next_utc_candle_close_time(
+    *,
+    candle_close_buffer_seconds: float,
+    now: datetime | pd.Timestamp | None = None,
+) -> pd.Timestamp:
+    current = _required_utc_timestamp(now if now is not None else datetime.now(timezone.utc), "now")
+    current_hour = current.floor("h")
+    current_hour_wake_time = current_hour + pd.Timedelta(seconds=candle_close_buffer_seconds)
+    if current < current_hour_wake_time:
+        return current_hour
+    return current_hour + pd.Timedelta(hours=1)
+
+
+def _expected_candle_timestamp(expected_close_ts: Any, *, candle_interval: pd.Timedelta) -> pd.Timestamp:
+    expected_close = _required_utc_timestamp(expected_close_ts, "expected_candle_close_ts")
+    return expected_close - candle_interval
+
+
+def _candle_store_contains_timestamp(candle_store: CandleStore, timestamp: Any) -> bool:
+    required_ts = _required_utc_timestamp(timestamp, "timestamp")
+    candles = candle_store.get_candles()
+    if candles.empty:
+        return False
+    return bool((candles[CANDLE_TIMESTAMP] == required_ts).any())
+
+
 def _runtime_delta_duration(settings: Any) -> str:
-    poll_seconds = int(getattr(getattr(settings, "runtime", None), "poll_seconds", 300) or 300)
-    hours = max(6, int(poll_seconds // 3600) + 3)
-    return f"{hours * 3600} S"
+    return "21600 S"
 
 
 def _market_data_settings_with_duration(source: Any, duration: str) -> Any:

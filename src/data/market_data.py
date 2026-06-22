@@ -40,11 +40,14 @@ class HistoricalDataRequest:
 class MarketDataClient:
     """Fetch historical bars from IB and return closed configured candles only."""
 
-    def __init__(self, ib_client: Any, *, settings: MarketDataSettings) -> None:
+    def __init__(self, ib_client: Any, *, settings: MarketDataSettings, candle_close_buffer_seconds: float) -> None:
         self._ib_client = ib_client
         self._settings = settings
         self._candle_duration = bar_size_to_timedelta(settings.bar_size)
-        self._close_buffer = pd.Timedelta(seconds=settings.candle_close_buffer_seconds)
+        self._close_buffer = _non_negative_timedelta(
+            candle_close_buffer_seconds,
+            "runtime.candle_close_buffer_seconds",
+        )
         self._logger = get_logger("data.market_data")
 
     async def fetch_historical_bars(
@@ -236,6 +239,14 @@ def _normalize_now(value: datetime | pd.Timestamp | None) -> pd.Timestamp:
 
 def _empty_candle_frame() -> pd.DataFrame:
     return pd.DataFrame(columns=REQUIRED_CANDLE_COLUMNS)
+
+
+def _non_negative_timedelta(value: Any, name: str) -> pd.Timedelta:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise MarketDataError(f"{name} must be a non-negative number.")
+    if value < 0:
+        raise MarketDataError(f"{name} must be zero or greater.")
+    return pd.Timedelta(seconds=float(value))
 
 
 def _float_attr(source: Any, name: str, *, fallback_attr: str | None = None) -> float:

@@ -46,7 +46,6 @@ class MarketDataSettings:
     historical_duration: str
     what_to_show: str
     use_rth: bool
-    candle_close_buffer_seconds: float
     gap_block_recent_bars: int
     gap_backfill_duration: str
 
@@ -143,7 +142,11 @@ class HealthSettings:
 
 @dataclass(frozen=True)
 class RuntimeSettings:
-    poll_seconds: int
+    candle_close_buffer_seconds: float
+    bar_retry_seconds: float
+    bar_retry_attempts: int
+    clock_advisory_enabled: bool
+    clock_advisory_warn_ms: int
     active_trade_monitor_seconds: int
 
 
@@ -283,11 +286,6 @@ def _load_market_data(raw: dict[str, Any]) -> MarketDataSettings:
     historical_duration = _required_string(section, "historical_duration", "market_data.historical_duration")
     what_to_show = _required_string(section, "what_to_show", "market_data.what_to_show")
     use_rth = _required_bool(section, "use_rth", "market_data.use_rth")
-    candle_close_buffer_seconds = _required_float(
-        section,
-        "candle_close_buffer_seconds",
-        "market_data.candle_close_buffer_seconds",
-    )
     gap_block_recent_bars = _required_int(section, "gap_block_recent_bars", "market_data.gap_block_recent_bars")
     gap_backfill_duration = _required_string(section, "gap_backfill_duration", "market_data.gap_backfill_duration")
 
@@ -296,8 +294,6 @@ def _load_market_data(raw: dict[str, Any]) -> MarketDataSettings:
             f"market_data.bar_size must be exactly '{SUPPORTED_BAR_SIZE_1_HOUR}' for this strategy."
         )
 
-    if candle_close_buffer_seconds < 0:
-        raise SettingsValidationError("market_data.candle_close_buffer_seconds must be zero or greater.")
     if gap_block_recent_bars <= 0:
         raise SettingsValidationError("market_data.gap_block_recent_bars must be greater than zero.")
     _validate_ib_duration(
@@ -316,7 +312,6 @@ def _load_market_data(raw: dict[str, Any]) -> MarketDataSettings:
         historical_duration=historical_duration,
         what_to_show=what_to_show,
         use_rth=use_rth,
-        candle_close_buffer_seconds=candle_close_buffer_seconds,
         gap_block_recent_bars=gap_block_recent_bars,
         gap_backfill_duration=gap_backfill_duration,
     )
@@ -675,20 +670,46 @@ def _load_health(raw: dict[str, Any]) -> HealthSettings:
 
 def _load_runtime(raw: dict[str, Any]) -> RuntimeSettings:
     section = _required_section(raw, "runtime")
-    poll_seconds = _required_int(section, "poll_seconds", "runtime.poll_seconds")
+    candle_close_buffer_seconds = _required_float(
+        section,
+        "candle_close_buffer_seconds",
+        "runtime.candle_close_buffer_seconds",
+    )
+    bar_retry_seconds = _required_float(section, "bar_retry_seconds", "runtime.bar_retry_seconds")
+    bar_retry_attempts = _required_int(section, "bar_retry_attempts", "runtime.bar_retry_attempts")
+    clock_advisory_enabled = _required_bool(
+        section,
+        "clock_advisory_enabled",
+        "runtime.clock_advisory_enabled",
+    )
+    clock_advisory_warn_ms = _required_int(
+        section,
+        "clock_advisory_warn_ms",
+        "runtime.clock_advisory_warn_ms",
+    )
     active_trade_monitor_seconds = _required_int(
         section,
         "active_trade_monitor_seconds",
         "runtime.active_trade_monitor_seconds",
     )
 
-    if poll_seconds <= 0:
-        raise SettingsValidationError("runtime.poll_seconds must be greater than zero.")
+    if candle_close_buffer_seconds < 0:
+        raise SettingsValidationError("runtime.candle_close_buffer_seconds must be zero or greater.")
+    if bar_retry_seconds <= 0:
+        raise SettingsValidationError("runtime.bar_retry_seconds must be greater than zero.")
+    if bar_retry_attempts <= 0:
+        raise SettingsValidationError("runtime.bar_retry_attempts must be greater than zero.")
+    if clock_advisory_warn_ms < 0:
+        raise SettingsValidationError("runtime.clock_advisory_warn_ms must be zero or greater.")
     if active_trade_monitor_seconds < 5 or active_trade_monitor_seconds > 15:
         raise SettingsValidationError("runtime.active_trade_monitor_seconds must be between 5 and 15.")
 
     return RuntimeSettings(
-        poll_seconds=poll_seconds,
+        candle_close_buffer_seconds=candle_close_buffer_seconds,
+        bar_retry_seconds=bar_retry_seconds,
+        bar_retry_attempts=bar_retry_attempts,
+        clock_advisory_enabled=clock_advisory_enabled,
+        clock_advisory_warn_ms=clock_advisory_warn_ms,
         active_trade_monitor_seconds=active_trade_monitor_seconds,
     )
 

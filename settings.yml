@@ -9,7 +9,6 @@ market_data:
   historical_duration: 30 D
   what_to_show: MIDPOINT
   use_rth: false
-  candle_close_buffer_seconds: 5
   gap_block_recent_bars: 25
   gap_backfill_duration: "1 D"
 
@@ -63,7 +62,11 @@ health:
   repeated_error_limit: 3
 
 runtime:
-  poll_seconds: 300
+  candle_close_buffer_seconds: 5
+  bar_retry_seconds: 15
+  bar_retry_attempts: 12
+  clock_advisory_enabled: true
+  clock_advisory_warn_ms: 5000
   active_trade_monitor_seconds: 10
 
 live:
